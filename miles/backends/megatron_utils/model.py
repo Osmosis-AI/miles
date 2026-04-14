@@ -187,6 +187,7 @@ def forward_only(
     data_iterator: Sequence[DataIterator],
     num_microbatches: Sequence[int],
     store_prefix: str = "",
+    multi_lora=None,
 ) -> dict[str, list[torch.Tensor]]:
     """Run forward passes only and collect non-loss outputs (e.g., logprobs).
 
@@ -251,6 +252,10 @@ def forward_only(
         packed_seq_params = get_packed_seq_params(batch, args)
         total_lengths = batch["total_lengths"]
         response_lengths = batch["response_lengths"]
+
+        if multi_lora is not None and "adapter_token_counts" in batch:
+            multi_lora.set_batch_tokens(batch["adapter_token_counts"])
+
         output_tensor = model(
             input_ids=tokens,
             position_ids=None,
@@ -323,6 +328,7 @@ def train_one_step(
     optimizer: MegatronOptimizer,
     opt_param_scheduler: OptimizerParamScheduler,
     num_microbatches: int,
+    multi_lora=None,
 ) -> tuple[dict[str, float], float]:
     """Execute a single pipeline-parallel training step.
 
@@ -395,6 +401,9 @@ def train_one_step(
             args.qkv_format,
             allgather_cp=args.allgather_cp,
         )
+
+        if multi_lora is not None and "adapter_token_counts" in batch:
+            multi_lora.set_batch_tokens(batch["adapter_token_counts"])
 
         from miles.utils.replay_base import all_replay_managers
 
@@ -505,6 +514,7 @@ def train(
     opt_param_scheduler: OptimizerParamScheduler,
     data_iterator: Sequence[DataIterator],
     num_microbatches: Sequence[int],
+    multi_lora=None,
 ) -> None:
     """Run training over a rollout consisting of multiple steps.
 
@@ -599,6 +609,7 @@ def train(
             optimizer,
             opt_param_scheduler,
             num_microbatches[step_id],
+            multi_lora=multi_lora,
         )
 
         if step_id == 0:
