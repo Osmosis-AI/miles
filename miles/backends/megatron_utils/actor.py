@@ -112,9 +112,11 @@ class MegatronTrainRayActor(TrainRayActor):
                 m.enable_check_replay_result = m.enabled and self.args.ci_test
 
         if getattr(args, "multi_lora", False):
+            import ray
+
             from .multi_lora import initialize_multi_lora_model_and_optimizer
 
-            adapter_configs = getattr(args, "multi_lora_adapter_configs", {})
+            adapter_configs = ray.get(self.multi_lora_controller.active_runs.remote())
             (self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id, self.multi_lora) = (
                 initialize_multi_lora_model_and_optimizer(args, adapter_configs, role)
             )
@@ -592,6 +594,9 @@ class MegatronTrainRayActor(TrainRayActor):
 
         self.weights_backuper.backup(model_tag)
         self._active_model_tag = model_tag
+
+    def set_multi_lora_controller(self, controller):
+        self.multi_lora_controller = controller
 
     def connect_actor_critic(
         self,
