@@ -35,6 +35,7 @@ from .checkpoint import load_checkpoint
 from .initialize import init, is_megatron_main_rank
 from .lora_utils import is_lora_enabled
 from .model import forward_only, initialize_model_and_optimizer, save, train
+from .multi_lora import is_multi_lora_enabled
 from .parallel import verify_megatron_parallel_state
 from .replay_utils import get_register_replay_list_func
 from .update_weight.common import named_params_and_buffers
@@ -111,7 +112,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 m.enabled = getattr(self.args, f"use_{m.name}_replay")
                 m.enable_check_replay_result = m.enabled and self.args.ci_test
 
-        if getattr(args, "multi_lora", False):
+        if is_multi_lora_enabled(args):
             import ray
 
             from .multi_lora import initialize_multi_lora_model_and_optimizer
