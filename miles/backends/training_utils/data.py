@@ -185,6 +185,19 @@ def get_batch(
     else:
         raise ValueError(f"Unsupported qkv_format: {qkv_format}")
 
+    # Multi-LoRA: compute per-adapter token counts from the final token shape.
+    adapter_slots = batch.get("adapter_slots")
+    if adapter_slots is not None:
+        n_adapters = data_iterator.rollout_data["n_adapters"]
+        total_tokens = tokens.numel()
+        raw_lengths = torch.tensor([t.size(0) for t in batch["unconcat_tokens"]], dtype=torch.float32)
+        raw_total = raw_lengths.sum()
+        counts = torch.zeros(n_adapters, dtype=torch.int32, device=torch.cuda.current_device())
+        for slot, length in zip(adapter_slots, raw_lengths):
+            counts[slot] += int(length / raw_total * total_tokens)
+        counts[adapter_slots[-1]] += total_tokens - counts.sum().item()
+        batch["adapter_token_counts"] = counts
+
     batch["tokens"] = tokens
 
     if get_position_ids:

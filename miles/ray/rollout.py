@@ -727,6 +727,9 @@ class RolloutManager:
         if any(sample.weight_versions for sample in samples):
             train_data["weight_versions"] = [sample.weight_versions for sample in samples]
 
+        if any(sample.adapter_name is not None for sample in samples):
+            train_data["adapter_names"] = [sample.adapter_name for sample in samples]
+
         if "teacher_log_probs" in samples[0].__dict__:
             train_data["teacher_log_probs"] = [sample.teacher_log_probs for sample in samples]
 
@@ -755,6 +758,18 @@ class RolloutManager:
         else:
             partitions = [range(i, len(total_lengths), dp_size) for i in range(dp_size)]
 
+        # Multi-LoRA: resolve adapter names to slot indices and sort partitions.
+        adapter_names = data.get("adapter_names")
+        if adapter_names is not None:
+            active = ray.get(self.args.multi_lora_controller.active_runs.remote())
+            slot_for = {name: cfg["slot"] for name, cfg in active.items()}
+            data["adapter_slots"] = [slot_for[name] for name in adapter_names]
+            data["n_adapters"] = self.args.multi_lora_n_adapters
+            partitions = [
+                sorted(p, key=lambda i: slot_for.get(adapter_names[i], 0))
+                for p in partitions
+            ]
+
         rollout_data_refs = []
 
         for i in range(dp_size):
@@ -775,6 +790,7 @@ class RolloutManager:
                 "prompt",
                 "teacher_log_probs",
                 "weight_versions",
+                "adapter_slots",
             ]:
                 if key not in data:
                     continue
@@ -785,6 +801,7 @@ class RolloutManager:
                 "raw_reward",
                 "total_lengths",
                 "dynamic_global_batch_size",
+                "n_adapters",
             ]:
                 if key not in data:
                     continue

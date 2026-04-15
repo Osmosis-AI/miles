@@ -97,14 +97,7 @@ def initialize_multi_lora_model_and_optimizer(
 ):
     """Drop-in alternative to initialize_model_and_optimizer for multi-LoRA.
 
-    Builds the model with MultiLoRA layers, creates the optimizer, loads the base
-    checkpoint, then registers adapters and loads per-adapter checkpoints.
-
-    The caller uses this instead of initialize_model_and_optimizer:
-        if multi_lora:
-            model, optimizer, scheduler, iteration, multi_lora = initialize_multi_lora_model_and_optimizer(...)
-        else:
-            model, optimizer, scheduler, iteration = initialize_model_and_optimizer(...)
+    Same return signature: (model, optimizer, scheduler, iteration).
     """
     from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
 
@@ -151,15 +144,18 @@ def initialize_multi_lora_model_and_optimizer(
     opt_param_scheduler.step(increment=iteration * args.global_batch_size)
 
     # Register adapters and load per-adapter checkpoints
+    from megatron.bridge.peft.multi_lora_layers import load_adapter, register_adapter
+
     for name, cfg in adapter_configs.items():
-        multi_lora.register_adapter(name, rank=cfg["rank"], alpha=cfg["alpha"])
+        idx = cfg["slot"]
+        register_adapter(model, idx, rank=cfg["rank"], alpha=cfg["alpha"])
         ckpt = find_latest_checkpoint(Path(cfg["dir"]) / "checkpoints")
         if ckpt:
             logger.info(f"Loading adapter '{name}' from {ckpt}")
             state_dict = torch.load(ckpt, map_location="cpu", weights_only=True)
-            multi_lora.load_adapter(model, name, state_dict)
+            load_adapter(model, idx, state_dict)
 
-    return model, optimizer, opt_param_scheduler, iteration, multi_lora
+    return model, optimizer, opt_param_scheduler, iteration
 
 
 def find_latest_checkpoint(ckpt_dir: Path) -> Path | None:

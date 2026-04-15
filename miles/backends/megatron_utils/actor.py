@@ -117,14 +117,13 @@ class MegatronTrainRayActor(TrainRayActor):
             from .multi_lora import initialize_multi_lora_model_and_optimizer
 
             adapter_configs = ray.get(self.multi_lora_controller.active_runs.remote())
-            (self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id, self.multi_lora) = (
+            (self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id) = (
                 initialize_multi_lora_model_and_optimizer(args, adapter_configs, role)
             )
         else:
             (self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id) = (
                 initialize_model_and_optimizer(args, role)
             )
-            self.multi_lora = None
 
         parallel_state = get_parallel_state()
         if parallel_state.cp.size > 1:
@@ -326,7 +325,6 @@ class MegatronTrainRayActor(TrainRayActor):
                 data_iterator,
                 num_microbatches,
                 store_prefix=store_prefix,
-                multi_lora=self.multi_lora,
             )
 
     def train(self, rollout_id: int, rollout_data_ref: Box) -> None:
@@ -451,7 +449,6 @@ class MegatronTrainRayActor(TrainRayActor):
                     self.opt_param_scheduler,
                     data_iterator,
                     num_microbatches,
-                    multi_lora=self.multi_lora,
                 )
 
             self.prof.step(rollout_id=rollout_id)
