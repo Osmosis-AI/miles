@@ -376,6 +376,10 @@ class MegatronTrainRayActor(TrainRayActor):
         return getattr(self.args, f"use_rollout_{m.name}_replay")
 
     def train_actor(self, rollout_id: int, rollout_data: RolloutBatch) -> None:
+        # Track which adapter slots had data this step
+        adapter_slots = rollout_data.get("adapter_slots")
+        self.active_adapter_slots = set(adapter_slots) if adapter_slots is not None else None
+
         # Create data iterator for log_probs and train.
         data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
 
@@ -490,7 +494,13 @@ class MegatronTrainRayActor(TrainRayActor):
 
             maybe_finalize_async_save(blocking=True)
 
-        save(rollout_id, self.model, self.optimizer, self.opt_param_scheduler)
+        if is_multi_lora_enabled(self.args):
+            from .update_weight.multi_lora_sync import save_multi_lora_checkpoints
+
+            adapter_configs = ray.get(self.multi_lora_controller.active_runs.remote())
+            save_multi_lora_checkpoints(self.args, self.model, rollout_id, adapter_configs)
+        else:
+            save(rollout_id, self.model, self.optimizer, self.opt_param_scheduler)
 
         if force_sync and self.args.async_save:
             maybe_finalize_async_save(blocking=True)
@@ -540,7 +550,22 @@ class MegatronTrainRayActor(TrainRayActor):
             torch_memory_saver.resume()
         with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
             print_memory("before update_weights")
-            self.weight_updater.update_weights()
+            if is_multi_lora_enabled(self.args):
+                from .update_weight.multi_lora_sync import sync_multi_lora_weights
+
+                adapter_configs = ray.get(self.multi_lora_controller.active_runs.remote())
+                sync_multi_lora_weights(
+                    args=self.args,
+                    model=self.model,
+                    adapter_configs=adapter_configs,
+                    rollout_engines=rollout_engines,
+                    ipc_engine=self.weight_updater._ipc_engine,
+                    ipc_gather_src=self.weight_updater._ipc_gather_src,
+                    ipc_gather_group=self.weight_updater._ipc_gather_group,
+                    active_slots=getattr(self, "active_adapter_slots", None),
+                )
+            else:
+                self.weight_updater.update_weights()
             print_memory("after update_weights")
 
             if self.args.ci_test and len(rollout_engines) > 0 and not is_lora_enabled(self.args):
