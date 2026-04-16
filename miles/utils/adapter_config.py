@@ -22,6 +22,7 @@ class AdapterConfig:
     input_key: str = "text"
     label_key: str | None = None
     rm_type: str | None = None
+    max_epochs: int | None = None
 
 
 def parse_adapter_yaml(path: Path) -> AdapterConfig:
@@ -38,4 +39,5 @@ def parse_adapter_yaml(path: Path) -> AdapterConfig:
         input_key=raw.get("input_key", "text"),
         label_key=raw.get("label_key"),
         rm_type=raw.get("rm_type"),
+        max_epochs=raw.get("max_epochs"),
     )
