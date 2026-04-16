@@ -1,8 +1,9 @@
 """Adapter config parsing for multi-LoRA training.
 
 Each adapter directory contains an adapter.yaml with per-adapter
-identity (name, rank, alpha) and data path. Training-level config
-(base model, target modules, max rank, LR) comes from CLI flags.
+identity (name, rank, alpha), data path, and dataset-specific keys.
+Training-level config (base model, target modules, max rank, LR)
+comes from CLI flags.
 """
 
 from dataclasses import dataclass, field
@@ -18,6 +19,9 @@ class AdapterConfig:
     alpha: int
     data: str
     dir: Path = field(default_factory=lambda: Path("."))
+    input_key: str = "text"
+    label_key: str | None = None
+    rm_type: str | None = None
 
 
 def parse_adapter_yaml(path: Path) -> AdapterConfig:
@@ -31,4 +35,7 @@ def parse_adapter_yaml(path: Path) -> AdapterConfig:
         alpha=raw["alpha"],
         data=raw["data"],
         dir=path.parent,
+        input_key=raw.get("input_key", "text"),
+        label_key=raw.get("label_key"),
+        rm_type=raw.get("rm_type"),
     )

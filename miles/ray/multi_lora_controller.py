@@ -103,6 +103,9 @@ class MultiLoRAController:
                 "alpha": self.configs[name].alpha,
                 "data": self.configs[name].data,
                 "dir": str(self.configs[name].dir),
+                "input_key": self.configs[name].input_key,
+                "label_key": self.configs[name].label_key,
+                "rm_type": self.configs[name].rm_type,
             }
             for name in self.configs
         }

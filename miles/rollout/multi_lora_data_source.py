@@ -2,11 +2,11 @@
 
 Implements the DataSource interface. Queries the MultiLoRAController for active
 adapters, lazily creates/removes per-adapter RolloutDataSource instances, and
-round-robins get_samples() across them. Each sample is stamped with adapter_name.
+round-robins get_samples() across them. Each sample is stamped with adapter_name
+and per-adapter metadata (rm_type).
 """
 
 import copy
-import itertools
 import logging
 from argparse import Namespace
 from pathlib import Path
@@ -24,33 +24,31 @@ class MultiLoRADataSource(DataSource):
         self.args = args
         self.controller = args.multi_lora_controller
         self.sources: dict[str, RolloutDataSource] = {}
-        self.adapter_dirs: dict[str, str] = {}
+        self.adapter_configs: dict[str, dict] = {}
         self._sync_from_controller()
 
     def _sync_from_controller(self):
         """Sync local data sources with the controller's active adapter set."""
         active = ray.get(self.controller.active_runs.remote())
 
-        # Remove data sources for deregistered adapters
         for name in list(self.sources.keys()):
             if name not in active:
                 del self.sources[name]
-                del self.adapter_dirs[name]
+                del self.adapter_configs[name]
                 logger.info(f"Removed data source for adapter '{name}'")
 
-        # Add data sources for newly registered adapters
         for name, cfg in active.items():
             if name not in self.sources:
-                adapter_dir = Path(cfg["dir"])
-                data_path = str(adapter_dir / "dataset.jsonl")
-                self.sources[name] = self._create_adapter_source(data_path)
-                self.adapter_dirs[name] = cfg["dir"]
-                logger.info(f"Created data source for adapter '{name}' from {data_path}")
+                self.sources[name] = self._create_adapter_source(cfg)
+                self.adapter_configs[name] = cfg
+                logger.info(f"Created data source for adapter '{name}' from {cfg['data']}")
 
-    def _create_adapter_source(self, data_path: str) -> RolloutDataSource:
+    def _create_adapter_source(self, cfg: dict) -> RolloutDataSource:
         """Create a RolloutDataSource for a single adapter's dataset."""
         adapter_args = copy.copy(self.args)
-        adapter_args.prompt_data = data_path
+        adapter_args.prompt_data = cfg["data"]
+        adapter_args.input_key = cfg.get("input_key", self.args.input_key)
+        adapter_args.label_key = cfg.get("label_key", self.args.label_key)
         return RolloutDataSource(adapter_args)
 
     def get_samples(self, num_samples: int) -> list[list[Sample]]:
@@ -69,25 +67,29 @@ class MultiLoRADataSource(DataSource):
             count = per_adapter + (1 if i < remainder else 0)
             if count == 0:
                 continue
+            cfg = self.adapter_configs[name]
             adapter_samples = self.sources[name].get_samples(count)
             for group in adapter_samples:
                 for sample in group:
                     sample.adapter_name = name
+                    if cfg.get("rm_type"):
+                        if sample.metadata is None:
+                            sample.metadata = {}
+                        sample.metadata["rm_type"] = cfg["rm_type"]
             all_samples.extend(adapter_samples)
 
         return all_samples
 
     def add_samples(self, samples: list[list[Sample]]):
-        """Route samples back to the appropriate adapter's data source."""
         for group in samples:
             name = group[0].adapter_name if group else None
             if name and name in self.sources:
                 self.sources[name].add_samples([group])
 
     def save(self, rollout_id):
-        for name, source in self.sources.items():
+        for source in self.sources.values():
             source.save(rollout_id)
 
     def load(self, rollout_id=None):
-        for name, source in self.sources.items():
+        for source in self.sources.values():
             source.load(rollout_id)
