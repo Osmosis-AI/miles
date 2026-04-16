@@ -480,6 +480,23 @@ class MegatronTrainRayActor(TrainRayActor):
 
         log_perf_data(rollout_id, self.args)
 
+        # Multi-LoRA: handle exhausted adapters
+        if is_multi_lora_enabled(self.args):
+            from .update_weight.multi_lora_sync import deregister_adapter
+
+            exhausted = ray.get(self.multi_lora_controller.get_exhausted.remote())
+            for name in exhausted:
+                deregister_adapter(
+                    name=name,
+                    rollout_id=rollout_id,
+                    args=self.args,
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    controller=self.multi_lora_controller,
+                    ipc_engine=self.weight_updater._ipc_engine,
+                    ipc_gather_src=self.weight_updater._ipc_gather_src,
+                )
+
     @timer
     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
         if self.args.debug_rollout_only:

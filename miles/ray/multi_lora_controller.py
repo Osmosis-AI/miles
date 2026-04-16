@@ -28,6 +28,7 @@ class MultiLoRAController:
         self.free_slots = set(range(max_adapters))
         self.locked = False
         self.pending = []  # buffered (method_name, args) while locked
+        self.exhausted = set()  # adapters marked as done by data source
 
     def lock(self):
         """Lock the adapter set. Register/deregister calls are buffered until unlock."""
@@ -110,6 +111,18 @@ class MultiLoRAController:
             }
             for name in self.configs
         }
+
+    def mark_exhausted(self, name: str) -> None:
+        """Mark an adapter as exhausted (dataset finished). Called by data source."""
+        if name in self.configs:
+            self.exhausted.add(name)
+            logger.info(f"Adapter '{name}' marked as exhausted")
+
+    def get_exhausted(self) -> list[str]:
+        """Return and clear the list of exhausted adapters. Called by actor after each step."""
+        names = list(self.exhausted)
+        self.exhausted.clear()
+        return names
 
 
 @asynccontextmanager

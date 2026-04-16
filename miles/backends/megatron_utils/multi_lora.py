@@ -182,14 +182,20 @@ def find_latest_checkpoint(ckpt_dir: Path) -> Path | None:
     return None
 
 
-def zero_optimizer_state_for_adapter(optimizer, multi_lora, model, adapter_name: str) -> None:
-    """Zero Adam exp_avg/exp_avg_sq for a specific adapter's parameters.
+def zero_optimizer_state_for_adapter(optimizer, model, idx: int) -> None:
+    """Zero Adam exp_avg/exp_avg_sq for a specific adapter slot's parameters."""
+    from megatron.bridge.peft.multi_lora_layers import MultiLoRALinear, SimpleMultiLoRALinear, _iter_multi_lora_modules
 
-    Used when swapping adapters in/out of a slot (future dynamic case).
-    """
     target_params = set()
-    for _, param in multi_lora.named_parameters_for_adapter(model, adapter_name):
-        target_params.add(id(param))
+    for module in _iter_multi_lora_modules(model):
+        if isinstance(module, MultiLoRALinear):
+            adapter = module.adapters[idx]
+            for param in adapter.parameters():
+                target_params.add(id(param))
+        elif isinstance(module, SimpleMultiLoRALinear):
+            adapter = module.adapters[idx]
+            for param in adapter.parameters():
+                target_params.add(id(param))
 
     for chained_optimizer in optimizer.chained_optimizers:
         for param, state in chained_optimizer.optimizer.state.items():

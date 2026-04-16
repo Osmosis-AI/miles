@@ -201,3 +201,49 @@ def save_multi_lora_checkpoints(
         native_path = ckpt_dir / f"adapter_megatron_tp{tp_rank}_pp{pp_rank}.pt"
         torch.save(adapter_state, native_path)
         logger.info(f"Saved adapter '{adapter_name}' checkpoint ({len(adapter_state)} tensors) to {native_path}")
+
+
+def deregister_adapter(
+    name: str,
+    rollout_id: int,
+    args,
+    model,
+    optimizer,
+    controller,
+    ipc_engine=None,
+    ipc_gather_src=None,
+):
+    """Full cleanup for an exhausted adapter: save, unload, reset, deregister."""
+    from megatron.bridge.peft.multi_lora_layers import unregister_adapter
+
+    from ..multi_lora import zero_optimizer_state_for_adapter
+
+    adapter_configs = ray.get(controller.active_runs.remote())
+    if name not in adapter_configs:
+        return
+
+    cfg = adapter_configs[name]
+    idx = cfg["slot"]
+
+    # 1. Save final checkpoint
+    save_multi_lora_checkpoints(args, model, rollout_id, {name: cfg})
+    logger.info(f"Saved final checkpoint for adapter '{name}'")
+
+    # 2. Unload from SGLang
+    if ipc_engine is not None and dist.get_rank() == ipc_gather_src:
+        try:
+            ray.get(ipc_engine.unload_lora_adapter.remote(lora_name=name))
+        except Exception:
+            pass
+    logger.info(f"Unloaded adapter '{name}' from SGLang")
+
+    # 3. Reset layer weights
+    unregister_adapter(model, idx)
+    logger.info(f"Reset layer weights for adapter '{name}' (slot {idx})")
+
+    # 4. Zero optimizer state
+    zero_optimizer_state_for_adapter(optimizer, model, idx)
+
+    # 5. Deregister from controller (frees slot)
+    ray.get(controller.deregister_run.remote(name))
+    logger.info(f"Fully deregistered adapter '{name}'")

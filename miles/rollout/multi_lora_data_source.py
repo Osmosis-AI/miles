@@ -98,10 +98,9 @@ class MultiLoRADataSource(DataSource):
                         sample.metadata["rm_type"] = cfg["rm_type"]
             all_samples.extend(adapter_samples)
 
-        # Deregister exhausted adapters
+        # Signal exhausted adapters to controller — actor handles the full cleanup
         for name in exhausted:
-            ray.get(self.controller.deregister_run.remote(name))
-            logger.info(f"Deregistered exhausted adapter '{name}'")
+            ray.get(self.controller.mark_exhausted.remote(name))
 
         return all_samples
 
