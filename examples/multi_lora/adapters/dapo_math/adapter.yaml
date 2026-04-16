@@ -1,0 +1,7 @@
+name: dapo_math
+rank: 16
+alpha: 32
+data: /data/dapo_math_17k/train.parquet
+input_key: messages
+label_key: label
+rm_type: dapo
