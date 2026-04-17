@@ -76,14 +76,21 @@ def sync_multi_lora_weights(
             continue
 
         # Debug: log exported weights summary
-        for hf_name, weight in hf_named_tensors[:4]:
+        logger.info(f"  [{adapter_name}] Exported {len(hf_named_tensors)} tensors")
+        logger.info(f"  [{adapter_name}] lora_config: {lora_config}")
+        for hf_name, weight in hf_named_tensors[:6]:
             logger.info(
                 f"  [{adapter_name}] {hf_name}: shape={list(weight.shape)}, "
+                f"dtype={weight.dtype}, "
                 f"norm={weight.float().norm().item():.6f}, "
                 f"absmax={weight.float().abs().max().item():.6f}"
             )
-        if len(hf_named_tensors) > 4:
-            logger.info(f"  [{adapter_name}] ... and {len(hf_named_tensors) - 4} more tensors")
+        if len(hf_named_tensors) > 6:
+            logger.info(f"  [{adapter_name}] ... and {len(hf_named_tensors) - 6} more tensors")
+
+        # Log all unique weight name patterns (layer 0 only)
+        layer0_names = [n for n, _ in hf_named_tensors if "layers.0." in n]
+        logger.info(f"  [{adapter_name}] Layer 0 weight names: {layer0_names}")
 
         # Send to SGLang engine
         _send_adapter_to_engine(
