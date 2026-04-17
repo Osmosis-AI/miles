@@ -62,7 +62,7 @@ def sync_multi_lora_weights(
         # Use the same HfWeightIteratorBridge as single LoRA, inside expose_adapter_slot
         with expose_adapter_slot(model, idx):
             iterator = HfWeightIteratorBridge(args=args, model=model, model_name=None, quantization_config=None, is_lora=True)
-            for hf_named_tensors in iterator.get_hf_weight_chunks(None):
+            for hf_named_tensors in iterator.get_hf_weight_chunks({}):
                 weight_tensors = [(n, t) for n, t in hf_named_tensors if is_lora_weight_name(n)]
                 if not weight_tensors:
                     continue
@@ -121,7 +121,7 @@ def save_multi_lora_checkpoints(
         adapter_state = {}
         with expose_adapter_slot(model, idx):
             iterator = HfWeightIteratorBridge(args=args, model=model, model_name=None, quantization_config=None, is_lora=True)
-            for hf_named_tensors in iterator.get_hf_weight_chunks(None):
+            for hf_named_tensors in iterator.get_hf_weight_chunks({}):
                 for hf_name, weight in hf_named_tensors:
                     adapter_state[hf_name] = weight.cpu()
 
