@@ -93,15 +93,21 @@ def sync_multi_lora_weights(
         layer0_names = [n for n, _ in hf_named_tensors if "layers.0." in n]
         logger.info(f"  [{adapter_name}] Layer 0 weight names: {layer0_names}")
 
-        # Send to SGLang engine
-        _send_adapter_to_engine(
-            adapter_name=adapter_name,
+        # Send to SGLang engine using the same path as single LoRA
+        from .update_weight_from_tensor import _send_to_colocated_engine
+
+        refs, long_lived = _send_to_colocated_engine(
             hf_named_tensors=hf_named_tensors,
-            lora_config=lora_config,
             ipc_engine=ipc_engine,
             ipc_gather_src=ipc_gather_src,
             ipc_gather_group=ipc_gather_group,
+            lora_config=lora_config,
+            lora_name=adapter_name,
+            lora_loaded=True,
         )
+        if refs:
+            ray.get(refs)
+        del long_lived
 
     dist.barrier(group=get_gloo_group())
 
