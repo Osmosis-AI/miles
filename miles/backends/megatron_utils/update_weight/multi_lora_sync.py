@@ -30,17 +30,16 @@ def sync_multi_lora_weights(
 ):
     """Sync all adapter weights to SGLang engines.
 
-    For each adapter slot, temporarily exposes it as a single-LoRA adapter,
-    exports via bridge, and sends to SGLang under the adapter's name.
+    For each adapter slot, temporarily exposes it as a single-LoRA adapter
+    and uses the existing single-LoRA weight sync path (HfWeightIteratorBridge
+    + _send_hf_params pattern) to export and send weights.
     """
-    from megatron.bridge import AutoBridge
     from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
 
-
     from miles.utils.megatron_bridge_utils import patch_megatron_model
-    from ..megatron_to_hf import postprocess_hf_param
-    from ..sglang import FlattenedTensorBucket, MultiprocessingSerializer
     from .common import post_process_weights
+    from .update_weight_from_tensor import _send_to_colocated_engine
+    from .hf_weight_iterator_bridge import HfWeightIteratorBridge
 
     rank = dist.get_rank()
 
@@ -51,7 +50,6 @@ def sync_multi_lora_weights(
         ray.get([engine.flush_cache.remote() for engine in rollout_engines])
     dist.barrier(group=get_gloo_group())
 
-    bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)
     lora_config = build_lora_sync_config(args)
 
     for adapter_name, cfg in adapter_configs.items():
@@ -61,56 +59,29 @@ def sync_multi_lora_weights(
             logger.info(f"Skipping weight sync for adapter '{adapter_name}' (slot {idx}) — not trained this step")
             continue
 
-        # Export this adapter's weights via bridge
-        with expose_adapter_slot(model, idx), patch_megatron_model(model):
-            hf_named_tensors = []
-            for hf_name, weight, megatron_name in bridge.export_adapter_weights(model, cpu=False, show_progress=False):
-                weight = postprocess_hf_param(
-                    args=args,
-                    megatron_param_name=megatron_name,
-                    hf_param_name=hf_name,
-                    param=weight,
+        # Use the same HfWeightIteratorBridge as single LoRA, inside expose_adapter_slot
+        with expose_adapter_slot(model, idx):
+            iterator = HfWeightIteratorBridge(args=args, model=model, model_name=None, quantization_config=None, is_lora=True)
+            for hf_named_tensors in iterator.get_hf_weight_chunks(None):
+                weight_tensors = [(n, t) for n, t in hf_named_tensors if is_lora_weight_name(n)]
+                if not weight_tensors:
+                    continue
+
+                refs, long_lived = _send_to_colocated_engine(
+                    hf_named_tensors=weight_tensors,
+                    ipc_engine=ipc_engine,
+                    ipc_gather_src=ipc_gather_src,
+                    ipc_gather_group=ipc_gather_group,
+                    lora_config=lora_config,
+                    lora_name=adapter_name,
+                    lora_loaded=adapter_name in _loaded_adapters,
                 )
-                if is_lora_weight_name(hf_name):
-                    hf_named_tensors.append((hf_name, weight))
+                if refs:
+                    results = ray.get(refs)
+                del long_lived
 
-        if not hf_named_tensors:
-            logger.warning(f"No LoRA weights exported for adapter '{adapter_name}' (slot {idx})")
-            continue
-
-        # Debug: log exported weights summary
-        logger.info(f"  [{adapter_name}] Exported {len(hf_named_tensors)} tensors")
-        logger.info(f"  [{adapter_name}] lora_config: {lora_config}")
-        for hf_name, weight in hf_named_tensors[:6]:
-            logger.info(
-                f"  [{adapter_name}] {hf_name}: shape={list(weight.shape)}, "
-                f"dtype={weight.dtype}, "
-                f"norm={weight.float().norm().item():.6f}, "
-                f"absmax={weight.float().abs().max().item():.6f}"
-            )
-        if len(hf_named_tensors) > 6:
-            logger.info(f"  [{adapter_name}] ... and {len(hf_named_tensors) - 6} more tensors")
-
-        # Log all unique weight name patterns (layer 0 only)
-        layer0_names = [n for n, _ in hf_named_tensors if "layers.0." in n]
-        logger.info(f"  [{adapter_name}] Layer 0 weight names: {layer0_names}")
-
-        # Send to SGLang engine using the same path as single LoRA
-        from .update_weight_from_tensor import _send_to_colocated_engine
-
-        refs, long_lived = _send_to_colocated_engine(
-            hf_named_tensors=hf_named_tensors,
-            ipc_engine=ipc_engine,
-            ipc_gather_src=ipc_gather_src,
-            ipc_gather_group=ipc_gather_group,
-            lora_config=lora_config,
-            lora_name=adapter_name,
-            lora_loaded=adapter_name in _loaded_adapters,
-        )
-        if refs:
-            ray.get(refs)
-        del long_lived
         _loaded_adapters.add(adapter_name)
+        logger.info(f"Synced adapter '{adapter_name}' weights to SGLang")
 
     dist.barrier(group=get_gloo_group())
 
@@ -125,106 +96,34 @@ def sync_multi_lora_weights(
     dist.barrier(group=get_gloo_group())
 
 
-def _send_adapter_to_engine(
-    adapter_name: str,
-    hf_named_tensors: list[tuple[str, torch.Tensor]],
-    lora_config: dict,
-    ipc_engine,
-    ipc_gather_src,
-    ipc_gather_group,
-):
-    """Serialize and send one adapter's weights to the colocated SGLang engine."""
-    from ..sglang import FlattenedTensorBucket, MultiprocessingSerializer
-
-    if ipc_gather_group is None:
-        return
-
-    if getattr(FlattenedTensorBucket, "supports_multi_dtypes", False):
-        converted = {"dtype": hf_named_tensors}
-    else:
-        converted = {}
-        for name, tensor in hf_named_tensors:
-            dtype = tensor.dtype
-            if dtype not in converted:
-                converted[dtype] = []
-            converted[dtype].append((name, tensor))
-
-    serialized_tensors = []
-    for _dtype, named_tensors in converted.items():
-        bucket = FlattenedTensorBucket(named_tensors=named_tensors)
-        data = {
-            "flattened_tensor": bucket.get_flattened_tensor(),
-            "metadata": bucket.get_metadata(),
-        }
-        serialized_tensors.append(MultiprocessingSerializer.serialize(data, output_str=True))
-
-    serialized_named_tensors = (
-        [None] * dist.get_world_size(ipc_gather_group) if ipc_gather_src == dist.get_rank() else None
-    )
-    dist.gather_object(
-        serialized_tensors,
-        object_gather_list=serialized_named_tensors,
-        dst=ipc_gather_src,
-        group=ipc_gather_group,
-    )
-
-    if dist.get_rank() == ipc_gather_src:
-        # Unload previous version of this adapter if loaded
-        try:
-            ray.get(ipc_engine.unload_lora_adapter.remote(lora_name=adapter_name))
-        except Exception:
-            pass  # Adapter may not have been loaded yet
-
-        ref = ipc_engine.load_lora_adapter_from_tensors.remote(
-            lora_name=adapter_name,
-            config_dict=lora_config,
-            serialized_tensors=serialized_named_tensors[0][0],
-            load_format="flattened_bucket",
-        )
-        result = ray.get(ref)
-
-        if isinstance(result, dict) and result.get("success") is False:
-            error_msg = result.get("error_message") or result.get("error") or "unknown"
-            raise RuntimeError(f"Multi-LoRA weight sync failed for '{adapter_name}': {error_msg}")
-
-        logger.info(f"Synced adapter '{adapter_name}' weights to SGLang")
-
-
 def save_multi_lora_checkpoints(
     args,
     model,
     iteration: int,
     adapter_configs: dict[str, dict],
 ):
-    """Save per-adapter checkpoints to each adapter's directory.
-
-    Each adapter's weights are saved in Megatron-native format (per TP/PP rank).
-    """
+    """Save per-adapter checkpoints to each adapter's directory."""
     from pathlib import Path
 
     from megatron.core import mpu
     from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
-    from megatron.bridge import AutoBridge
 
-    import miles_plugins.megatron_bridge  # noqa: F401
-    from miles.utils.megatron_bridge_utils import patch_megatron_model
-    from ..megatron_to_hf import postprocess_hf_param
+    from .hf_weight_iterator_bridge import HfWeightIteratorBridge
 
     tp_rank = mpu.get_tensor_model_parallel_rank()
     pp_rank = mpu.get_pipeline_model_parallel_rank()
-
-    bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)
 
     for adapter_name, cfg in adapter_configs.items():
         idx = cfg["slot"]
         ckpt_dir = Path(cfg["dir"]) / "checkpoints" / f"step_{iteration}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save Megatron-native per-rank adapter weights
         adapter_state = {}
-        with expose_adapter_slot(model, idx), patch_megatron_model(model):
-            for hf_name, weight, megatron_name in bridge.export_adapter_weights(model, cpu=True, show_progress=False):
-                adapter_state[hf_name] = weight
+        with expose_adapter_slot(model, idx):
+            iterator = HfWeightIteratorBridge(args=args, model=model, model_name=None, quantization_config=None, is_lora=True)
+            for hf_named_tensors in iterator.get_hf_weight_chunks(None):
+                for hf_name, weight in hf_named_tensors:
+                    adapter_state[hf_name] = weight.cpu()
 
         native_path = ckpt_dir / f"adapter_megatron_tp{tp_rank}_pp{pp_rank}.pt"
         torch.save(adapter_state, native_path)
@@ -274,4 +173,5 @@ def deregister_adapter(
 
     # 5. Deregister from controller (frees slot)
     ray.get(controller.deregister_run.remote(name))
+    _loaded_adapters.discard(name)
     logger.info(f"Fully deregistered adapter '{name}'")
