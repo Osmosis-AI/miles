@@ -55,6 +55,7 @@ class UpdateWeightFromTensor:
         self.weight_version = 0
         self.is_lora = is_lora
         self._lora_loaded = False
+        self._lora_name = LORA_ADAPTER_NAME
 
         self._hf_weight_iterator = HfWeightIteratorBase.create(
             args=args,
@@ -244,7 +245,7 @@ class UpdateWeightFromTensor:
         if self.is_lora:
             kwargs |= dict(
                 lora_config=self._lora_config,
-                lora_name=LORA_ADAPTER_NAME,
+                lora_name=self._lora_name,
                 lora_loaded=self._lora_loaded,
             )
         else:
