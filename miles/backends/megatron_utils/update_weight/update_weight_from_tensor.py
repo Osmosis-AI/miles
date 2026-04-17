@@ -56,6 +56,7 @@ class UpdateWeightFromTensor:
         self.is_lora = is_lora
         self._lora_loaded = False
         self._lora_name = LORA_ADAPTER_NAME
+        self._multi_lora_loaded: set[str] = set()
 
         self._hf_weight_iterator = HfWeightIteratorBase.create(
             args=args,
@@ -211,6 +212,59 @@ class UpdateWeightFromTensor:
             # `post_process_quantization` is related to the `process_weights_after_loading`
             # in the sglang rollout side, which should always be invoked after weight
             # updating.
+            post_process_weights(
+                rollout_engines=self.rollout_engines,
+                restore_weights_before_load=False,
+                post_process_quantization=True,
+            )
+            ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+        dist.barrier(group=get_gloo_group())
+
+    @torch.no_grad()
+    def update_multi_lora_weights(self, adapter_configs: dict[str, dict], active_slots: set[int] | None = None) -> None:
+        """Sync multiple LoRA adapters. Pause/resume once, loop export+send per adapter."""
+        from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
+
+        self.weight_version += 1
+
+        rank = dist.get_rank()
+        if rank == 0:
+            mode = self.args.pause_generation_mode
+            ray.get([engine.pause_generation.remote(mode=mode) for engine in self.rollout_engines])
+            ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+        dist.barrier(group=get_gloo_group())
+
+        for adapter_name, cfg in adapter_configs.items():
+            idx = cfg["slot"]
+            if active_slots is not None and idx not in active_slots:
+                continue
+
+            with expose_adapter_slot(self.model, idx):
+                megatron_local_weights = self.weights_getter()
+                for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(megatron_local_weights):
+                    weight_tensors = [(n, t) for n, t in hf_named_tensors if is_lora_weight_name(n)]
+                    if not weight_tensors:
+                        continue
+                    kwargs = dict(
+                        hf_named_tensors=weight_tensors,
+                        ipc_engine=self._ipc_engine,
+                        ipc_gather_src=self._ipc_gather_src,
+                        ipc_gather_group=self._ipc_gather_group,
+                        lora_config=self._lora_config,
+                        lora_name=adapter_name,
+                        lora_loaded=adapter_name in self._multi_lora_loaded,
+                    )
+                    refs, long_lived_tensors = _send_to_colocated_engine(**kwargs)
+                    if refs:
+                        results = ray.get(refs)
+                        _check_weight_sync_results(results, is_lora=True)
+                    del long_lived_tensors
+
+            self._multi_lora_loaded.add(adapter_name)
+
+        dist.barrier(group=get_gloo_group())
+
+        if rank == 0:
             post_process_weights(
                 rollout_engines=self.rollout_engines,
                 restore_weights_before_load=False,
