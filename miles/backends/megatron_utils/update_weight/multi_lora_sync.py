@@ -34,6 +34,7 @@ def sync_multi_lora_weights(
     from megatron.bridge import AutoBridge
     from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
 
+
     from miles.utils.megatron_bridge_utils import patch_megatron_model
     from ..megatron_to_hf import postprocess_hf_param
     from ..sglang import FlattenedTensorBucket, MultiprocessingSerializer
@@ -196,6 +197,7 @@ def save_multi_lora_checkpoints(
     from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
     from megatron.bridge import AutoBridge
 
+    import miles_plugins.megatron_bridge  # noqa: F401
     from miles.utils.megatron_bridge_utils import patch_megatron_model
     from ..megatron_to_hf import postprocess_hf_param
 
@@ -208,10 +210,6 @@ def save_multi_lora_checkpoints(
         idx = cfg["slot"]
         ckpt_dir = Path(cfg["dir"]) / "checkpoints" / f"step_{iteration}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-        # Clear bridge's adapter cache so it re-discovers params for this slot
-        if hasattr(bridge._model_bridge, "_cached_param_objects_adapter"):
-            del bridge._model_bridge._cached_param_objects_adapter
 
         # Save Megatron-native per-rank adapter weights
         adapter_state = {}
