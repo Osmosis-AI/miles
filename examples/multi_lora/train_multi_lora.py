@@ -27,6 +27,7 @@ from miles.ray.placement_group import (
     create_rollout_manager,
 )
 from miles.utils.arguments import parse_args
+from miles.utils.async_utils import eager_create_task
 from miles.utils.logging_utils import configure_logger
 from miles.utils.misc import should_run_periodic_action
 from miles.utils.tracking_utils import init_tracking
@@ -44,14 +45,14 @@ async def train(args):
         if (adapter_dir / "adapter.yaml").exists():
             ray.get(controller.register_run.remote(str(adapter_dir)))
 
-    # Make controller accessible to rollout manager
+    # Put controller on args for data source
     args.multi_lora_controller = controller
     args.data_source_path = "miles.rollout.multi_lora_data_source.MultiLoRADataSource"
 
     # Create rollout manager
     rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
 
-    # Allocate training group — but don't init yet
+    # Allocate training group
     actor_model = allocate_train_group(
         args=args,
         num_nodes=args.actor_num_nodes,
@@ -60,6 +61,17 @@ async def train(args):
         role="actor",
         with_ref=args.kl_coef != 0 or args.use_kl_loss,
     )
+    critic_model = None
+    if args.use_critic:
+        critic_model = allocate_train_group(
+            args=args,
+            num_nodes=args.critic_num_nodes,
+            num_gpus_per_node=args.critic_num_gpus_per_node,
+            pg=pgs["critic"],
+            role="critic",
+            with_ref=False,
+        )
+        critic_init_task = await eager_create_task(critic_model.init())
 
     # Set controller BEFORE init — workers need it to query adapter configs
     await actor_model.set_multi_lora_controller(controller)
@@ -69,12 +81,21 @@ async def train(args):
     if args.start_rollout_id is None:
         args.start_rollout_id = start_rollout_ids[0]
 
+    if args.use_critic:
+        await critic_init_task
+        await actor_model.connect(critic_model)
+
     await actor_model.set_rollout_manager(rollout_manager)
     if args.rollout_global_dataset:
         await rollout_manager.load.remote(args.start_rollout_id - 1)
 
-    # Initial weight sync so SGLang has the adapter weights
+    if args.offload_rollout:
+        await rollout_manager.onload_weights.remote()
+
     await actor_model.update_weights()
+
+    if args.offload_rollout:
+        await rollout_manager.onload_kv.remote()
 
     # Training loop
     for rollout_id in range(args.start_rollout_id, args.num_rollout):

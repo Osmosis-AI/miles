@@ -14,7 +14,7 @@ ray stop --force || true
 sleep 3
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source "${SCRIPT_DIR}/../../scripts/models/qwen2.5-0.5B.sh"
+source scripts/models/qwen3-4B.sh
 
 ray start --head --node-ip-address 127.0.0.1 --num-gpus $GPUS_PER_NODE --disable-usage-stats
 
@@ -33,7 +33,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    --use-miles-router \
    ${MODEL_ARGS[@]} \
    \
-   --hf-checkpoint /root/Qwen2.5-0.5B-Instruct/ \
+   --hf-checkpoint /root/Qwen3-4B/ \
    --megatron-to-hf-mode bridge \
    --lora-rank 32 \
    --lora-alpha 32 \
@@ -42,12 +42,13 @@ ray job submit --address="http://127.0.0.1:8265" \
    --multi-lora-dir "${SCRIPT_DIR}/adapters" \
    --multi-lora-n-adapters 4 \
    \
+   # Per-adapter datasets and reward types are in adapter.yaml.
+   # --prompt-data is a dummy required by args validation.
    --prompt-data /root/gsm8k/train.parquet \
    --input-key messages \
    --label-key label \
    --apply-chat-template \
    --rollout-shuffle \
-   --rm-type math \
    --num-rollout 100 \
    --rollout-batch-size 32 \
    --n-samples-per-prompt 8 \
