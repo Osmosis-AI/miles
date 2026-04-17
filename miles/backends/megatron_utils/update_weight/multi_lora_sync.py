@@ -58,6 +58,10 @@ def sync_multi_lora_weights(
             logger.info(f"Skipping weight sync for adapter '{adapter_name}' (slot {idx}) — not trained this step")
             continue
 
+        # Clear bridge's adapter cache so it re-discovers params for this slot
+        if hasattr(bridge._model_bridge, "_cached_param_objects_adapter"):
+            del bridge._model_bridge._cached_param_objects_adapter
+
         # Export this adapter's weights via bridge
         with expose_adapter_slot(model, idx), patch_megatron_model(model):
             hf_named_tensors = []
@@ -191,6 +195,10 @@ def save_multi_lora_checkpoints(
         idx = cfg["slot"]
         ckpt_dir = Path(cfg["dir"]) / "checkpoints" / f"step_{iteration}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        # Clear bridge's adapter cache so it re-discovers params for this slot
+        if hasattr(bridge._model_bridge, "_cached_param_objects_adapter"):
+            del bridge._model_bridge._cached_param_objects_adapter
 
         # Save Megatron-native per-rank adapter weights
         adapter_state = {}
