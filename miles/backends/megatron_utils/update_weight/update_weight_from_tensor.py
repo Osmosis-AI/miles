@@ -228,23 +228,33 @@ class UpdateWeightFromTensor:
         self.weight_version += 1
 
         rank = dist.get_rank()
+        logger.info(f"[multi_lora_sync] Starting. rank={rank}, adapters={list(adapter_configs.keys())}")
+
         if rank == 0:
             mode = self.args.pause_generation_mode
+            logger.info("[multi_lora_sync] Pausing generation")
             ray.get([engine.pause_generation.remote(mode=mode) for engine in self.rollout_engines])
+            logger.info("[multi_lora_sync] Flushing cache")
             ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+        logger.info("[multi_lora_sync] Barrier after pause/flush")
         dist.barrier(group=get_gloo_group())
 
         for adapter_name, cfg in adapter_configs.items():
             idx = cfg["slot"]
             if active_slots is not None and idx not in active_slots:
+                logger.info(f"[multi_lora_sync] Skipping {adapter_name} (slot {idx})")
                 continue
 
+            logger.info(f"[multi_lora_sync] Exposing adapter {adapter_name} (slot {idx})")
             with expose_adapter_slot(self.model, idx):
+                logger.info(f"[multi_lora_sync] Getting weights for {adapter_name}")
                 megatron_local_weights = self.weights_getter()
+                logger.info(f"[multi_lora_sync] Exporting HF chunks for {adapter_name}")
                 for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(megatron_local_weights):
                     weight_tensors = [(n, t) for n, t in hf_named_tensors if is_lora_weight_name(n)]
                     if not weight_tensors:
                         continue
+                    logger.info(f"[multi_lora_sync] Sending {len(weight_tensors)} tensors for {adapter_name}")
                     kwargs = dict(
                         hf_named_tensors=weight_tensors,
                         ipc_engine=self._ipc_engine,
@@ -256,15 +266,19 @@ class UpdateWeightFromTensor:
                     )
                     refs, long_lived_tensors = _send_to_colocated_engine(**kwargs)
                     if refs:
+                        logger.info(f"[multi_lora_sync] Waiting for send to complete for {adapter_name}")
                         results = ray.get(refs)
                         _check_weight_sync_results(results, is_lora=True)
                     del long_lived_tensors
 
             self._multi_lora_loaded.add(adapter_name)
+            logger.info(f"[multi_lora_sync] Done with {adapter_name}")
 
+        logger.info("[multi_lora_sync] Barrier after all adapters")
         dist.barrier(group=get_gloo_group())
 
         if rank == 0:
+            logger.info("[multi_lora_sync] Post-processing weights")
             post_process_weights(
                 rollout_engines=self.rollout_engines,
                 restore_weights_before_load=False,
