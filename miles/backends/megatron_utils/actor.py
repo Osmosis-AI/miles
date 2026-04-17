@@ -558,7 +558,7 @@ class MegatronTrainRayActor(TrainRayActor):
             if dist.get_rank() == 0:
                 ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
 
-        if self.args.offload_train and (is_lora_enabled(self.args) or is_multi_lora_enabled(self.args)):
+        if self.args.offload_train and is_lora_enabled(self.args):
             # For LoRA, we must resume() to restore GPU memory backing for adapter
             # weights. Unlike base model weights (which are read from CPU backups),
             # LoRA adapter weights are accessed directly from GPU model parameters.
@@ -597,7 +597,7 @@ class MegatronTrainRayActor(TrainRayActor):
                     self.weights_backuper.backup("old_actor")
 
         if self.args.offload_train:
-            if is_lora_enabled(self.args) or is_multi_lora_enabled(self.args):
+            if is_lora_enabled(self.args):
                 torch_memory_saver.pause()
             destroy_process_groups()
 

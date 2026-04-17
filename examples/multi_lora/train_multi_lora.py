@@ -97,18 +97,38 @@ async def train(args):
     if args.offload_rollout:
         await rollout_manager.onload_kv.remote()
 
-    # Training loop
+    from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
+
+    # Training loop (mirrors train.py including offload/onload)
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
         if args.eval_interval is not None and rollout_id == 0 and not args.skip_eval_before_train:
             await rollout_manager.eval.remote(rollout_id)
 
         rollout_data_ref = await rollout_manager.generate.remote(rollout_id)
+
+        if args.offload_rollout:
+            offload_tags = [GPU_MEMORY_TYPE_CUDA_GRAPH]
+            if "kv_cache" in args.offload_rollout_level:
+                offload_tags.append(GPU_MEMORY_TYPE_KV_CACHE)
+            if "weight" in args.offload_rollout_level:
+                offload_tags.append(GPU_MEMORY_TYPE_WEIGHTS)
+            await rollout_manager.offload.remote(tags=offload_tags)
+
         await actor_model.train(rollout_id, rollout_data_ref)
 
         if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
             await actor_model.save_model(rollout_id)
 
+        if args.offload_train:
+            await actor_model.offload()
+        else:
+            await actor_model.clear_memory()
+
+        if args.offload_rollout:
+            await rollout_manager.onload_weights.remote()
         await actor_model.update_weights()
+        if args.offload_rollout:
+            await rollout_manager.onload_kv.remote()
 
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
             await rollout_manager.eval.remote(rollout_id)
