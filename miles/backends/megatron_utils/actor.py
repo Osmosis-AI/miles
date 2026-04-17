@@ -558,7 +558,7 @@ class MegatronTrainRayActor(TrainRayActor):
             if dist.get_rank() == 0:
                 ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
 
-        if self.args.offload_train and is_lora_enabled(self.args):
+        if self.args.offload_train and (is_lora_enabled(self.args) or is_multi_lora_enabled(self.args)):
             # For LoRA, we must resume() to restore GPU memory backing for adapter
             # weights. Unlike base model weights (which are read from CPU backups),
             # LoRA adapter weights are accessed directly from GPU model parameters.
@@ -568,19 +568,20 @@ class MegatronTrainRayActor(TrainRayActor):
         with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
             print_memory("before update_weights")
             if is_multi_lora_enabled(self.args):
-                from .update_weight.multi_lora_sync import sync_multi_lora_weights
+                from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
 
                 adapter_configs = ray.get(self.multi_lora_controller.active_runs.remote())
-                sync_multi_lora_weights(
-                    args=self.args,
-                    model=self.model,
-                    adapter_configs=adapter_configs,
-                    rollout_engines=rollout_engines,
-                    ipc_engine=self.weight_updater._ipc_engine,
-                    ipc_gather_src=self.weight_updater._ipc_gather_src,
-                    ipc_gather_group=self.weight_updater._ipc_gather_group,
-                    active_slots=getattr(self, "active_adapter_slots", None),
-                )
+                active_slots = getattr(self, "active_adapter_slots", None)
+                if not hasattr(self, "_multi_lora_loaded"):
+                    self._multi_lora_loaded = set()
+                for adapter_name, cfg in adapter_configs.items():
+                    if active_slots is not None and cfg["slot"] not in active_slots:
+                        continue
+                    self.weight_updater._lora_name = adapter_name
+                    self.weight_updater._lora_loaded = adapter_name in self._multi_lora_loaded
+                    with expose_adapter_slot(self.model, cfg["slot"]):
+                        self.weight_updater.update_weights()
+                    self._multi_lora_loaded.add(adapter_name)
             else:
                 self.weight_updater.update_weights()
             print_memory("after update_weights")
@@ -605,7 +606,7 @@ class MegatronTrainRayActor(TrainRayActor):
                     self.weights_backuper.backup("old_actor")
 
         if self.args.offload_train:
-            if is_lora_enabled(self.args):
+            if is_lora_enabled(self.args) or is_multi_lora_enabled(self.args):
                 torch_memory_saver.pause()
             destroy_process_groups()
 
