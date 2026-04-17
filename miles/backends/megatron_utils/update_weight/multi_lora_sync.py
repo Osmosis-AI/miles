@@ -58,10 +58,6 @@ def sync_multi_lora_weights(
             logger.info(f"Skipping weight sync for adapter '{adapter_name}' (slot {idx}) — not trained this step")
             continue
 
-        # Clear bridge's adapter cache so it re-discovers params for this slot
-        if hasattr(bridge._model_bridge, "_cached_param_objects_adapter"):
-            del bridge._model_bridge._cached_param_objects_adapter
-
         # Export this adapter's weights via bridge
         with expose_adapter_slot(model, idx), patch_megatron_model(model):
             hf_named_tensors = []
@@ -78,6 +74,16 @@ def sync_multi_lora_weights(
         if not hf_named_tensors:
             logger.warning(f"No LoRA weights exported for adapter '{adapter_name}' (slot {idx})")
             continue
+
+        # Debug: log exported weights summary
+        for hf_name, weight in hf_named_tensors[:4]:
+            logger.info(
+                f"  [{adapter_name}] {hf_name}: shape={list(weight.shape)}, "
+                f"norm={weight.float().norm().item():.6f}, "
+                f"absmax={weight.float().abs().max().item():.6f}"
+            )
+        if len(hf_named_tensors) > 4:
+            logger.info(f"  [{adapter_name}] ... and {len(hf_named_tensors) - 4} more tensors")
 
         # Send to SGLang engine
         _send_adapter_to_engine(
