@@ -27,8 +27,16 @@ def create_multi_lora(args: Namespace):
 
     from miles.backends.megatron_utils.lora_utils import convert_target_modules_to_megatron
 
+    lora_type_name = getattr(args, "lora_type", "lora").lower()
+    if lora_type_name == "canonical_lora":
+        from megatron.bridge.peft.canonical_lora import CanonicalLoRA
+        lora_cls = CanonicalLoRA
+    else:
+        from megatron.bridge.peft.lora import LoRA
+        lora_cls = LoRA
+
     return MultiLoRA(
-        target_modules=convert_target_modules_to_megatron(args.target_modules),
+        target_modules=convert_target_modules_to_megatron(args.target_modules, lora_type=lora_cls),
         n_adapters=args.multi_lora_n_adapters,
         dim=args.lora_rank,
         alpha=args.lora_alpha,
