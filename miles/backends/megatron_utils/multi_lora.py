@@ -131,13 +131,16 @@ def initialize_multi_lora_model_and_optimizer(
     )
     opt_param_scheduler = get_optimizer_param_scheduler(args, optimizer)
 
-    # Load base checkpoint
+    # Load base checkpoint — hide adapter params so the bridge doesn't try to map them
+    from megatron.bridge.peft.multi_lora_layers import hide_adapters
+
     clear_memory()
-    iteration, _ = load_checkpoint(
-        model, optimizer, opt_param_scheduler,
-        checkpointing_context={},
-        skip_load_to_model_and_opt=False,
-    )
+    with hide_adapters(model):
+        iteration, _ = load_checkpoint(
+            model, optimizer, opt_param_scheduler,
+            checkpointing_context={},
+            skip_load_to_model_and_opt=False,
+        )
     check_peak_gpu_memory_after_load(args)
     clear_memory()
     check_model_hashes(args, model, iteration)
