@@ -764,7 +764,6 @@ class RolloutManager:
             active = ray.get(self.args.multi_lora_controller.active_runs.remote())
             slot_for = {name: cfg["slot"] for name, cfg in active.items()}
             data["adapter_slots"] = [slot_for[name] for name in adapter_names]
-            data["n_adapters"] = self.args.multi_lora_n_adapters
             partitions = [
                 sorted(p, key=lambda i: slot_for.get(adapter_names[i], 0))
                 for p in partitions
@@ -801,11 +800,12 @@ class RolloutManager:
                 "raw_reward",
                 "total_lengths",
                 "dynamic_global_batch_size",
-                "n_adapters",
             ]:
                 if key not in data:
                     continue
                 rollout_data[key] = data[key]
+            if "adapter_slots" in rollout_data:
+                rollout_data["n_adapters"] = self.args.multi_lora_n_adapters
             rollout_data_refs.append(Box(ray.put(rollout_data)))
         return rollout_data_refs
 
