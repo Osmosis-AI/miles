@@ -41,9 +41,6 @@ ray job submit --address="http://127.0.0.1:8265" \
    --target-modules "all-linear" \
    --multi-lora-dir "${SCRIPT_DIR}/adapters" \
    --multi-lora-n-adapters 4 \
-   \
-   # Per-adapter datasets and reward types are in adapter.yaml.
-   # --prompt-data is a dummy required by args validation.
    --prompt-data /root/gsm8k/train.parquet \
    --input-key messages \
    --label-key label \
