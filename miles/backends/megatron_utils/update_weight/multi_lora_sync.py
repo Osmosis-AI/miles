@@ -15,6 +15,8 @@ from miles.utils.distributed_utils import get_gloo_group
 
 logger = logging.getLogger(__name__)
 
+_loaded_adapters: set[str] = set()
+
 
 def sync_multi_lora_weights(
     args,
@@ -103,11 +105,12 @@ def sync_multi_lora_weights(
             ipc_gather_group=ipc_gather_group,
             lora_config=lora_config,
             lora_name=adapter_name,
-            lora_loaded=True,
+            lora_loaded=adapter_name in _loaded_adapters,
         )
         if refs:
             ray.get(refs)
         del long_lived
+        _loaded_adapters.add(adapter_name)
 
     dist.barrier(group=get_gloo_group())
 
