@@ -245,11 +245,7 @@ class UpdateWeightFromTensor:
                 logger.info(f"[multi_lora_sync] Skipping {adapter_name} (slot {idx})")
                 continue
 
-            # Per-adapter config with the adapter's own rank/alpha for correct scaling
-            from .multi_lora_sync import build_adapter_lora_sync_config
-            adapter_lora_config = build_adapter_lora_sync_config(self.args, cfg)
-
-            logger.info(f"[multi_lora_sync] Exposing adapter {adapter_name} (slot {idx}, r={cfg['rank']}, alpha={cfg['alpha']})")
+            logger.info(f"[multi_lora_sync] Exposing adapter {adapter_name} (slot {idx})")
             with expose_adapter_slot(self.model, idx):
                 megatron_local_weights = self.weights_getter()
                 for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(megatron_local_weights):
@@ -261,7 +257,7 @@ class UpdateWeightFromTensor:
                         ipc_engine=self._ipc_engine,
                         ipc_gather_src=self._ipc_gather_src,
                         ipc_gather_group=self._ipc_gather_group,
-                        lora_config=adapter_lora_config,
+                        lora_config=self._lora_config,
                         lora_name=adapter_name,
                         lora_loaded=adapter_name in self._multi_lora_loaded,
                     )
