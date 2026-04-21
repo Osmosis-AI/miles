@@ -245,22 +245,23 @@ class UpdateWeightFromTensor:
                 logger.info(f"[multi_lora_sync] Skipping {adapter_name} (slot {idx})")
                 continue
 
-            logger.info(f"[multi_lora_sync] Exposing adapter {adapter_name} (slot {idx})")
+            # Per-adapter config with the adapter's own rank/alpha for correct scaling
+            from .multi_lora_sync import build_adapter_lora_sync_config
+            adapter_lora_config = build_adapter_lora_sync_config(self.args, cfg)
+
+            logger.info(f"[multi_lora_sync] Exposing adapter {adapter_name} (slot {idx}, r={cfg['rank']}, alpha={cfg['alpha']})")
             with expose_adapter_slot(self.model, idx):
-                logger.info(f"[multi_lora_sync] Getting weights for {adapter_name}")
                 megatron_local_weights = self.weights_getter()
-                logger.info(f"[multi_lora_sync] Exporting HF chunks for {adapter_name}")
                 for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(megatron_local_weights):
                     weight_tensors = [(n, t) for n, t in hf_named_tensors if is_lora_weight_name(n)]
                     if not weight_tensors:
                         continue
-                    logger.info(f"[multi_lora_sync] Sending {len(weight_tensors)} tensors for {adapter_name}")
                     kwargs = dict(
                         hf_named_tensors=weight_tensors,
                         ipc_engine=self._ipc_engine,
                         ipc_gather_src=self._ipc_gather_src,
                         ipc_gather_group=self._ipc_gather_group,
-                        lora_config=self._lora_config,
+                        lora_config=adapter_lora_config,
                         lora_name=adapter_name,
                         lora_loaded=adapter_name in self._multi_lora_loaded,
                     )

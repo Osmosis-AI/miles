@@ -18,6 +18,14 @@ logger = logging.getLogger(__name__)
 _loaded_adapters: set[str] = set()
 
 
+def build_adapter_lora_sync_config(args, adapter_cfg: dict) -> dict:
+    """Build per-adapter LoRA config using the adapter's own rank/alpha."""
+    config = build_lora_sync_config(args)
+    config["r"] = adapter_cfg["rank"]
+    config["lora_alpha"] = adapter_cfg["alpha"]
+    return config
+
+
 def sync_multi_lora_weights(
     args,
     model,
