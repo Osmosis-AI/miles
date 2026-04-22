@@ -18,6 +18,15 @@ logger = logging.getLogger(__name__)
 _loaded_adapters: set[str] = set()
 
 
+def slice_lora_to_rank(hf_name: str, tensor: torch.Tensor, adapter_rank: int) -> torch.Tensor:
+    """Slice a LoRA weight tensor from max_rank to adapter_rank for export."""
+    if "lora_A" in hf_name:
+        return tensor[:adapter_rank]
+    if "lora_B" in hf_name:
+        return tensor[:, :adapter_rank]
+    return tensor
+
+
 
 
 def sync_multi_lora_weights(
@@ -52,20 +61,25 @@ def sync_multi_lora_weights(
         ray.get([engine.flush_cache.remote() for engine in rollout_engines])
     dist.barrier(group=get_gloo_group())
 
-    lora_config = build_lora_sync_config(args)
-
     for adapter_name, cfg in adapter_configs.items():
         idx = cfg["slot"]
+        adapter_rank = cfg.get("rank", args.lora_rank)
 
         if active_slots is not None and idx not in active_slots:
             logger.info(f"Skipping weight sync for adapter '{adapter_name}' (slot {idx}) — not trained this step")
             continue
 
+        lora_config = build_lora_sync_config(args)
+        lora_config["r"] = adapter_rank
+
         # Use the same HfWeightIteratorBridge as single LoRA, inside expose_adapter_slot
         with expose_adapter_slot(model, idx):
             iterator = HfWeightIteratorBridge(args=args, model=model, model_name=None, quantization_config=None, is_lora=True)
             for hf_named_tensors in iterator.get_hf_weight_chunks({}):
-                weight_tensors = [(n, t) for n, t in hf_named_tensors if is_lora_weight_name(n)]
+                weight_tensors = [
+                    (n, slice_lora_to_rank(n, t, adapter_rank))
+                    for n, t in hf_named_tensors if is_lora_weight_name(n)
+                ]
                 if not weight_tensors:
                     continue
 

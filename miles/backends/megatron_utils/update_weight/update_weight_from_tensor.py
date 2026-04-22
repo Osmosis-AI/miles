@@ -11,6 +11,7 @@ from ray import ObjectRef
 from ray.actor import ActorHandle
 
 from miles.backends.megatron_utils.lora_utils import LORA_ADAPTER_NAME, build_lora_sync_config, is_lora_weight_name
+from miles.backends.megatron_utils.update_weight.multi_lora_sync import slice_lora_to_rank
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.distributed_utils import get_gloo_group
 
@@ -241,15 +242,22 @@ class UpdateWeightFromTensor:
 
         for adapter_name, cfg in adapter_configs.items():
             idx = cfg["slot"]
+            adapter_rank = cfg.get("rank", self.args.lora_rank)
             if active_slots is not None and idx not in active_slots:
                 logger.info(f"[multi_lora_sync] Skipping {adapter_name} (slot {idx})")
                 continue
 
-            logger.info(f"[multi_lora_sync] Exposing adapter {adapter_name} (slot {idx})")
+            lora_config = build_lora_sync_config(self.args)
+            lora_config["r"] = adapter_rank
+
+            logger.info(f"[multi_lora_sync] Exposing adapter {adapter_name} (slot {idx}, rank {adapter_rank})")
             with expose_adapter_slot(self.model, idx):
                 megatron_local_weights = self.weights_getter()
                 for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(megatron_local_weights):
-                    weight_tensors = [(n, t) for n, t in hf_named_tensors if is_lora_weight_name(n)]
+                    weight_tensors = [
+                        (n, slice_lora_to_rank(n, t, adapter_rank))
+                        for n, t in hf_named_tensors if is_lora_weight_name(n)
+                    ]
                     if not weight_tensors:
                         continue
                     kwargs = dict(
@@ -257,7 +265,7 @@ class UpdateWeightFromTensor:
                         ipc_engine=self._ipc_engine,
                         ipc_gather_src=self._ipc_gather_src,
                         ipc_gather_group=self._ipc_gather_group,
-                        lora_config=self._lora_config,
+                        lora_config=lora_config,
                         lora_name=adapter_name,
                         lora_loaded=adapter_name in self._multi_lora_loaded,
                     )
