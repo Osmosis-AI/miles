@@ -107,6 +107,7 @@ class MultiLoRAController:
                 "input_key": self.configs[name].input_key,
                 "label_key": self.configs[name].label_key,
                 "rm_type": self.configs[name].rm_type,
+                "custom_rm_path": self.configs[name].custom_rm_path,
                 "max_epochs": self.configs[name].max_epochs,
             }
             for name in self.configs

@@ -33,6 +33,7 @@ class MultiLoRADataSource(DataSource):
     def _sync_from_controller(self):
         """Sync local data sources with the controller's active adapter set."""
         active = ray.get(self.controller.active_runs.remote())
+        self.args.adapter_configs = active
 
         for name in list(self.sources.keys()):
             if name not in active:
@@ -92,10 +93,6 @@ class MultiLoRADataSource(DataSource):
             for group in adapter_samples:
                 for sample in group:
                     sample.adapter_name = name
-                    if cfg.get("rm_type"):
-                        if sample.metadata is None:
-                            sample.metadata = {}
-                        sample.metadata["rm_type"] = cfg["rm_type"]
             all_samples.extend(adapter_samples)
 
         # Signal exhausted adapters to controller — actor handles the full cleanup
