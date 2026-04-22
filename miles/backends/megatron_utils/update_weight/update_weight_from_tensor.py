@@ -249,6 +249,7 @@ class UpdateWeightFromTensor:
 
             lora_config = build_lora_sync_config(self.args)
             lora_config["r"] = adapter_rank
+            lora_config["lora_alpha"] = cfg.get("alpha", self.args.lora_alpha)
 
             logger.info(f"[multi_lora_sync] Exposing adapter {adapter_name} (slot {idx}, rank {adapter_rank})")
             with expose_adapter_slot(self.model, idx):

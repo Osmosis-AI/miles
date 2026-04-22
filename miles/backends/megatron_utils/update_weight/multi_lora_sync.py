@@ -71,6 +71,7 @@ def sync_multi_lora_weights(
 
         lora_config = build_lora_sync_config(args)
         lora_config["r"] = adapter_rank
+        lora_config["lora_alpha"] = cfg.get("alpha", args.lora_alpha)
 
         # Use the same HfWeightIteratorBridge as single LoRA, inside expose_adapter_slot
         with expose_adapter_slot(model, idx):
