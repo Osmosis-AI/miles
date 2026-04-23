@@ -470,5 +470,3 @@ def build_lora_sync_config(args: Namespace) -> dict[str, Any]:
         "bias": "none",
         "task_type": "CAUSAL_LM",
     }
-
-
