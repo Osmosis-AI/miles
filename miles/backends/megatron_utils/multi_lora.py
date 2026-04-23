@@ -166,6 +166,10 @@ def initialize_multi_lora_model_and_optimizer(
             state_dict = torch.load(ckpt, map_location="cpu", weights_only=True)
             load_adapter(model, idx, state_dict)
 
+    # Sync bf16 model params → fp32 optimizer main params so the rank
+    # masking applied by register_adapter is reflected in the fp32 copies.
+    optimizer.reload_model_params()
+
     return model, optimizer, opt_param_scheduler, iteration
 
 

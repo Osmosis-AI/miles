@@ -185,8 +185,9 @@ def deregister_adapter(
     unregister_adapter(model, idx)
     logger.info(f"Reset layer weights for adapter '{name}' (slot {idx})")
 
-    # 4. Zero optimizer state
+    # 4. Zero optimizer state and sync reset weights to fp32 main params
     zero_optimizer_state_for_adapter(optimizer, model, idx)
+    optimizer.reload_model_params()
 
     # 5. Deregister from controller (frees slot)
     ray.get(controller.deregister_run.remote(name))
