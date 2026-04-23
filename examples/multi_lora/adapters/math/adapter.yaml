@@ -1,7 +1,0 @@
-name: gsm8k
-rank: 16
-alpha: 32
-data: /root/dapo-math-17k/dapo-math-17k.jsonl
-input_key: prompt
-label_key: label
-rm_type: math
