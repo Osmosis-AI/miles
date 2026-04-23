@@ -1202,7 +1202,7 @@ def _compute_per_adapter_metrics(args, samples: list[Sample]) -> dict:
             continue
         rewards = [s.get_reward_value(args) for s in adapter_samples]
         response_lengths = [s.effective_response_length for s in adapter_samples]
-        prefix = f"rollout/adapter/{name}/"
+        prefix = f"{name}/rollout/"
         log_dict |= dict_add_prefix(compute_statistics(rewards), f"{prefix}reward/")
         log_dict |= dict_add_prefix(compute_statistics(response_lengths), f"{prefix}response_len/")
     return log_dict
