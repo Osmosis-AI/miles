@@ -270,7 +270,6 @@ class UpdateWeightFromTensor:
                 _check_weight_sync_results(results, is_lora=False)
                 del long_lived_tensors
 
-        all_long_lived = []
         for adapter_name, cfg in adapter_configs.items():
             idx = cfg["slot"]
             adapter_rank = cfg.get("rank", self.args.lora_rank)
@@ -306,11 +305,10 @@ class UpdateWeightFromTensor:
                         logger.info(f"[multi_lora_sync] Waiting for send to complete for {adapter_name}")
                         results = ray.get(refs)
                         _check_weight_sync_results(results, is_lora=True)
-                    all_long_lived.append(long_lived_tensors)
+                    del long_lived_tensors
 
             self._multi_lora_loaded.add(adapter_name)
             logger.info(f"[multi_lora_sync] Done with {adapter_name}")
-        del all_long_lived
 
         logger.info("[multi_lora_sync] Barrier after all adapters")
         dist.barrier(group=get_gloo_group())
