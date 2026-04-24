@@ -141,6 +141,10 @@ def get_batch(
         cp_rank = parallel_state.cp.rank
 
         if allgather_cp:
+            assert batch.get("adapter_slots") is None, (
+                "allgather CP is not supported with multi-LoRA: "
+                "global chunking breaks per-adapter token boundaries"
+            )
             # DSA mode: concatenate all sequences first, then slice once with CP.
             # We also pad the *global* concatenated stream to make per-rank chunks equal.
             cu_seqlens_list: list[int] = [0]
