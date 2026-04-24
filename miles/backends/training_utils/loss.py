@@ -687,6 +687,22 @@ def policy_loss_function(
         rollout_log_probs = torch.cat(batch["rollout_log_probs"], dim=0)
         train_rollout_logprob_abs_diff = sum_of_sample_mean((old_log_probs - rollout_log_probs).abs())
 
+        # TODO: remove per-adapter debug logging once multi-LoRA sync is validated
+        if batch.get("adapter_slots") is not None:
+            _dbg_slots = batch["adapter_slots"]
+            _dbg_per_sample_diff = [(old_lp - rl_lp).abs().mean().item()
+                                    for old_lp, rl_lp in zip(batch["log_probs"] if not args.use_rollout_logprobs else batch["rollout_log_probs"],
+                                                             batch["rollout_log_probs"])]
+            from collections import defaultdict
+            _dbg_by_adapter = defaultdict(list)
+            for _s, _d in zip(_dbg_slots, _dbg_per_sample_diff):
+                _dbg_by_adapter[_s].append(_d)
+            for _slot, _diffs in sorted(_dbg_by_adapter.items()):
+                import logging as _logging
+                _logging.getLogger(__name__).info(
+                    f"[debug] adapter slot {_slot}: mean lgprob diff={sum(_diffs)/len(_diffs):.6e}, n={len(_diffs)}"
+                )
+
     reported_loss = {
         "loss": loss.clone().detach(),
         "pg_loss": pg_loss.clone().detach(),
