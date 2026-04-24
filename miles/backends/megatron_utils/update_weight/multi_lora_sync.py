@@ -19,10 +19,23 @@ _loaded_adapters: set[str] = set()
 
 
 def slice_lora_to_rank(hf_name: str, tensor: torch.Tensor, adapter_rank: int) -> torch.Tensor:
-    """Slice a LoRA weight tensor from max_rank to adapter_rank for export."""
-    if "lora_A" in hf_name:
+    """Slice a LoRA weight tensor from max_rank to adapter_rank for export.
+
+    TODO: remove the zero-padding assertions once mixed-rank sync is validated.
+    """
+    if "lora_A" in hf_name and adapter_rank < tensor.shape[0]:
+        remainder = tensor[adapter_rank:]
+        assert remainder.abs().max() == 0, (
+            f"lora_A padded dims are non-zero: {hf_name}, "
+            f"max={remainder.abs().max().item():.6e}, shape={tensor.shape}, rank={adapter_rank}"
+        )
         return tensor[:adapter_rank]
-    if "lora_B" in hf_name:
+    if "lora_B" in hf_name and adapter_rank < tensor.shape[1]:
+        remainder = tensor[:, adapter_rank:]
+        assert remainder.abs().max() == 0, (
+            f"lora_B padded dims are non-zero: {hf_name}, "
+            f"max={remainder.abs().max().item():.6e}, shape={tensor.shape}, rank={adapter_rank}"
+        )
         return tensor[:, :adapter_rank]
     return tensor
 
