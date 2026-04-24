@@ -64,7 +64,6 @@ class UpdateWeightFromTensor:
             model=model,
             model_name=model_name,
             quantization_config=quantization_config,
-            is_lora=self.is_lora,
         )
         if self.is_lora:
             self._lora_config = build_lora_sync_config(args)
@@ -273,7 +272,7 @@ class UpdateWeightFromTensor:
             logger.info(f"[multi_lora_sync] Exposing adapter {adapter_name} (slot {idx}, rank {adapter_rank})")
             with expose_adapter_slot(self.model, idx):
                 megatron_local_weights = self.weights_getter()
-                for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(megatron_local_weights):
+                for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(megatron_local_weights, weight_type="lora"):
                     weight_tensors = [
                         (n, slice_lora_to_rank(n, t, adapter_rank))
                         for n, t in hf_named_tensors if is_lora_weight_name(n)
