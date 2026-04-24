@@ -258,6 +258,15 @@ class UpdateWeightFromTensor:
         logger.info("[multi_lora_sync] Barrier after pause/flush")
         dist.barrier(group=get_gloo_group())
 
+        megatron_local_weights = self.weights_getter()
+        for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
+            megatron_local_weights, weight_type="base"
+        ):
+            refs, long_lived_tensors = self._send_base_params(hf_named_tensors)
+            results = ray.get(refs)
+            _check_weight_sync_results(results, is_lora=False)
+            del long_lived_tensors
+
         for adapter_name, cfg in adapter_configs.items():
             idx = cfg["slot"]
             adapter_rank = cfg.get("rank", self.args.lora_rank)
@@ -271,7 +280,6 @@ class UpdateWeightFromTensor:
 
             logger.info(f"[multi_lora_sync] Exposing adapter {adapter_name} (slot {idx}, rank {adapter_rank})")
             with expose_adapter_slot(self.model, idx):
-                megatron_local_weights = self.weights_getter()
                 for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(megatron_local_weights, weight_type="lora"):
                     weight_tensors = [
                         (n, slice_lora_to_rank(n, t, adapter_rank))
