@@ -695,12 +695,33 @@ def policy_loss_function(
             _abs_diff = (old_log_probs - rollout_log_probs).abs()
             _per_sample = _abs_diff.split(response_lengths, dim=0)
             _per_adapter_diff = [0.0] * _n_adapters
-            for _s, _d, _lm in zip(batch["adapter_slots"], _per_sample, batch["loss_masks"]):
+            _per_adapter_count = [0] * _n_adapters
+            _per_adapter_old_lp = [0.0] * _n_adapters
+            _per_adapter_rollout_lp = [0.0] * _n_adapters
+            for _s, _d, _lm, _o_lp, _r_lp in zip(
+                batch["adapter_slots"], _per_sample, batch["loss_masks"],
+                (old_log_probs).split(response_lengths, dim=0),
+                (rollout_log_probs).split(response_lengths, dim=0),
+            ):
                 if args.calculate_per_token_loss:
                     _val = (_d * _lm).sum()
+                    _olp = (_o_lp * _lm).sum()
+                    _rlp = (_r_lp * _lm).sum()
                 else:
-                    _val = (_d * _lm).sum() / torch.clamp_min(_lm.sum(), 1)
+                    _denom = torch.clamp_min(_lm.sum(), 1)
+                    _val = (_d * _lm).sum() / _denom
+                    _olp = (_o_lp * _lm).sum() / _denom
+                    _rlp = (_r_lp * _lm).sum() / _denom
                 _per_adapter_diff[_s] += _val.item()
+                _per_adapter_old_lp[_s] += _olp.item()
+                _per_adapter_rollout_lp[_s] += _rlp.item()
+                _per_adapter_count[_s] += 1
+            # Scaled version: true per-adapter average after aggregation's /total_samples
+            _num_samples = len(batch["adapter_slots"])
+            _per_adapter_avg = [0.0] * _n_adapters
+            for _s in range(_n_adapters):
+                if _per_adapter_count[_s] > 0:
+                    _per_adapter_avg[_s] = _per_adapter_diff[_s] * _num_samples / _per_adapter_count[_s]
 
     reported_loss = {
         "loss": loss.clone().detach(),
