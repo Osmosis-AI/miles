@@ -27,7 +27,9 @@ def _make_layer(in_features, out_features, n_adapters, max_rank, adapter_configs
     """
     from megatron.bridge.peft.multi_lora_layers import SimpleMultiLoRALinear, register_adapter
 
-    base = nn.Linear(in_features, out_features, bias=False)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    base = nn.Linear(in_features, out_features, bias=False, device=device)
     nn.init.normal_(base.weight, mean=0, std=0.02)
 
     layer = SimpleMultiLoRALinear(base, n_adapters=n_adapters, dim=max_rank, alpha=1.0)
@@ -59,7 +61,7 @@ def test_forward_independence():
 
     layer = _make_layer(256, 128, n_adapters=2, max_rank=32,
                         adapter_configs=[(32, 32.0), (16, 16.0)])
-    layer = layer.to(device).eval()
+    layer.eval()
 
     n_a, n_b = 50, 30
     torch.manual_seed(123)
@@ -100,7 +102,7 @@ def test_composition_invariance():
 
     layer = _make_layer(256, 128, n_adapters=2, max_rank=32,
                         adapter_configs=[(32, 32.0), (16, 16.0)])
-    layer = layer.to(device).eval()
+    layer.eval()
 
     n_a = 50
     torch.manual_seed(123)
@@ -133,7 +135,7 @@ def test_scaling():
     configs = [(32, 32.0), (16, 16.0)]  # (rank, alpha)
     layer = _make_layer(256, 128, n_adapters=2, max_rank=max_rank,
                         adapter_configs=configs)
-    layer = layer.to(device).eval()
+    layer.eval()
 
     ok = True
     for idx, (rank, alpha) in enumerate(configs):
@@ -179,7 +181,7 @@ def test_zero_padding():
     actual_rank = 16
     layer = _make_layer(256, 128, n_adapters=2, max_rank=max_rank,
                         adapter_configs=[(max_rank, 32.0), (actual_rank, 16.0)])
-    layer = layer.to(device).eval()
+    layer.eval()
 
     # After register_adapter + apply_rank_masks, the lower-rank adapter's
     # weights should be zero in the padded region.
@@ -215,7 +217,6 @@ def test_backup_restore():
 
     layer = _make_layer(256, 128, n_adapters=2, max_rank=32,
                         adapter_configs=[(32, 32.0), (16, 16.0)])
-    layer = layer.to(device)
 
     orig = {n: p.data.clone() for n, p in layer.named_parameters()}
     backup = {n: p.data.clone().cpu() for n, p in layer.named_parameters()}
