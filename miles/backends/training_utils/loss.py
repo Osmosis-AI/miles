@@ -687,20 +687,21 @@ def policy_loss_function(
         rollout_log_probs = torch.cat(batch["rollout_log_probs"], dim=0)
         train_rollout_logprob_abs_diff = sum_of_sample_mean((old_log_probs - rollout_log_probs).abs())
 
-        # TODO: remove per-adapter debug logging once multi-LoRA sync is validated
+        # Per-adapter lgprob diff tracking for multi-LoRA
+        # TODO: remove once multi-LoRA lgprob diff is resolved; use adapter names instead of slot indices
         if batch.get("adapter_slots") is not None:
-            _dbg_slots = batch["adapter_slots"]
-            _dbg_per_sample_diff = [(old_lp - rl_lp).abs().mean().item()
-                                    for old_lp, rl_lp in zip(batch["log_probs"] if not args.use_rollout_logprobs else batch["rollout_log_probs"],
-                                                             batch["rollout_log_probs"])]
-            from collections import defaultdict
-            _dbg_by_adapter = defaultdict(list)
-            for _s, _d in zip(_dbg_slots, _dbg_per_sample_diff):
-                _dbg_by_adapter[_s].append(_d)
-            for _slot, _diffs in sorted(_dbg_by_adapter.items()):
-                import logging as _logging
-                _logging.getLogger(__name__).info(
-                    f"[debug] adapter slot {_slot}: mean lgprob diff={sum(_diffs)/len(_diffs):.6e}, n={len(_diffs)}"
+            _slots = batch["adapter_slots"]
+            _old = batch["log_probs"] if not args.use_rollout_logprobs else batch["rollout_log_probs"]
+            _rl = batch["rollout_log_probs"]
+            n_adapters = batch.get("n_adapters", max(_slots) + 1)
+            _per_adapter_sum = [0.0] * n_adapters
+            _per_adapter_count = [0] * n_adapters
+            for _s, _o, _r in zip(_slots, _old, _rl):
+                _per_adapter_sum[_s] += (_o - _r).abs().mean().item()
+                _per_adapter_count[_s] += 1
+            for _s in range(n_adapters):
+                reported_loss[f"train_rollout_logprob_abs_diff/slot_{_s}"] = (
+                    torch.tensor(_per_adapter_sum[_s], device=logits.device)
                 )
 
     reported_loss = {
