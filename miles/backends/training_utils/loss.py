@@ -735,9 +735,18 @@ def policy_loss_function(
         reported_loss["train_rollout_logprob_abs_diff"] = train_rollout_logprob_abs_diff.clone().detach()
 
     if _per_adapter_diff is not None:
-        for _s, _v in enumerate(_per_adapter_diff):
+        for _s in range(len(_per_adapter_diff)):
             reported_loss[f"train_rollout_logprob_abs_diff/slot_{_s}"] = (
-                torch.tensor(_v, device=logits.device)
+                torch.tensor(_per_adapter_diff[_s], device=logits.device)
+            )
+            reported_loss[f"train_rollout_logprob_abs_diff_avg/slot_{_s}"] = (
+                torch.tensor(_per_adapter_avg[_s], device=logits.device)
+            )
+            reported_loss[f"old_log_probs/slot_{_s}"] = (
+                torch.tensor(_per_adapter_old_lp[_s], device=logits.device)
+            )
+            reported_loss[f"rollout_log_probs/slot_{_s}"] = (
+                torch.tensor(_per_adapter_rollout_lp[_s], device=logits.device)
             )
 
     if args.use_kl_loss:
