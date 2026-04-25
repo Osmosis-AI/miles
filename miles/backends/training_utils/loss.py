@@ -690,12 +690,12 @@ def policy_loss_function(
 
         # Per-adapter lgprob diff tracking for multi-LoRA
         # TODO: remove once multi-LoRA lgprob diff is resolved; use adapter names instead of slot indices
-        if batch.get("adapter_slots") is not None:
+        _n_adapters = getattr(args, "multi_lora_n_adapters", 0)
+        if _n_adapters > 0 and batch.get("adapter_slots") is not None:
             _slots = batch["adapter_slots"]
             _old = batch["log_probs"] if not args.use_rollout_logprobs else batch["rollout_log_probs"]
             _rl = batch["rollout_log_probs"]
-            n_adapters = batch.get("n_adapters", max(_slots) + 1)
-            _per_adapter_diff = [0.0] * n_adapters
+            _per_adapter_diff = [0.0] * _n_adapters
             for _s, _o, _r in zip(_slots, _old, _rl):
                 _per_adapter_diff[_s] += (_o - _r).abs().mean().item()
 
