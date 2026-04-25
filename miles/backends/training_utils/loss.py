@@ -696,7 +696,10 @@ def policy_loss_function(
             _per_sample = _abs_diff.split(response_lengths, dim=0)
             _per_adapter_diff = [0.0] * _n_adapters
             for _s, _d, _lm in zip(batch["adapter_slots"], _per_sample, batch["loss_masks"]):
-                _val = (_d * _lm).sum() / torch.clamp_min(_lm.sum(), 1)
+                if args.calculate_per_token_loss:
+                    _val = (_d * _lm).sum()
+                else:
+                    _val = (_d * _lm).sum() / torch.clamp_min(_lm.sum(), 1)
                 _per_adapter_diff[_s] += _val.item()
 
     reported_loss = {
