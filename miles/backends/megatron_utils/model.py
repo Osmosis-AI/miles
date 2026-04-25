@@ -658,6 +658,19 @@ def train(
             for param_group_id, param_group in enumerate(optimizer.param_groups):
                 extra_metrics[f"lr-pg_{param_group_id}"] = opt_param_scheduler.get_lr(param_group)
 
+            if getattr(args, "multi_lora_n_adapters", 0) > 0:
+                from megatron.bridge.peft.multi_lora_layers import _iter_multi_lora_modules
+                _norms = {}
+                for _m in _iter_multi_lora_modules(model):
+                    for _i, _a in enumerate(_m.adapters):
+                        _key = f"slot_{_i}"
+                        if _key not in _norms:
+                            _norms[_key] = 0.0
+                        _norms[_key] += _a.linear_out.weight.data.float().norm().item() ** 2
+                    break  # first layer only
+                for _key, _sq in _norms.items():
+                    extra_metrics[f"{_key}/lora_B_norm"] = _sq ** 0.5
+
             log_dict = log_train_step(
                 args=args,
                 loss_dict=loss_dict,

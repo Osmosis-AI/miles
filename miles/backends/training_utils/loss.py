@@ -701,16 +701,21 @@ def policy_loss_function(
             _per_adapter_ntokens = [0.0] * _n_adapters
             _per_adapter_old_lp = [0.0] * _n_adapters
             _per_adapter_rollout_lp = [0.0] * _n_adapters
-            for _s, _d, _lm, _o_lp, _r_lp in zip(
+            _per_adapter_resp_len_sum = [0.0] * _n_adapters
+            _per_adapter_count = [0.0] * _n_adapters
+            for _s, _d, _lm, _o_lp, _r_lp, _rlen in zip(
                 batch["adapter_slots"], _per_sample_diff, batch["loss_masks"],
                 old_log_probs.split(response_lengths, dim=0),
                 rollout_log_probs.split(response_lengths, dim=0),
+                response_lengths,
             ):
                 _mask_sum = _lm.sum()
                 _per_adapter_diff_sum[_s] += (_d * _lm).sum().item()
                 _per_adapter_ntokens[_s] += _mask_sum.item()
                 _per_adapter_old_lp[_s] += (_o_lp * _lm).sum().item()
                 _per_adapter_rollout_lp[_s] += (_r_lp * _lm).sum().item()
+                _per_adapter_resp_len_sum[_s] += _rlen
+                _per_adapter_count[_s] += 1.0
 
     reported_loss = {
         "loss": loss.clone().detach(),
@@ -736,6 +741,12 @@ def policy_loss_function(
             )
             reported_loss[f"slot_{_s}/rollout_log_probs"] = (
                 torch.tensor(_per_adapter_rollout_lp[_s], device=logits.device)
+            )
+            reported_loss[f"slot_{_s}/resp_len_sum"] = (
+                torch.tensor(_per_adapter_resp_len_sum[_s], device=logits.device)
+            )
+            reported_loss[f"slot_{_s}/sample_count"] = (
+                torch.tensor(_per_adapter_count[_s], device=logits.device)
             )
 
     if args.use_kl_loss:
