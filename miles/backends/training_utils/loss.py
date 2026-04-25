@@ -695,9 +695,11 @@ def policy_loss_function(
             _slots = batch["adapter_slots"]
             _old = batch["log_probs"] if not args.use_rollout_logprobs else batch["rollout_log_probs"]
             _rl = batch["rollout_log_probs"]
+            _lms = batch["loss_masks"]
             _per_adapter_diff = [0.0] * _n_adapters
-            for _s, _o, _r in zip(_slots, _old, _rl):
-                _per_adapter_diff[_s] += (_o - _r).abs().mean().item()
+            for _s, _o, _r, _lm in zip(_slots, _old, _rl, _lms):
+                _d = ((_o - _r).abs() * _lm).sum() / torch.clamp_min(_lm.sum(), 1)
+                _per_adapter_diff[_s] += _d.item()
 
     reported_loss = {
         "loss": loss.clone().detach(),
