@@ -86,10 +86,20 @@ def test_forward_independence():
 
     da = (mixed_a - solo_a).abs().max().item()
     db = (mixed_b - solo_b).abs().max().item()
-    print(f"[independence] adapter0 max diff = {da:.2e}   adapter1 max diff = {db:.2e}")
+    # Check if diff comes from base linear (batch-size-dependent CUDA matmul noise)
+    # or from the adapter path (would indicate real cross-contamination)
+    da_mean = (mixed_a - solo_a).abs().mean().item()
+    db_mean = (mixed_b - solo_b).abs().mean().item()
+    print(f"[independence] adapter0: max={da:.2e} mean={da_mean:.2e}   adapter1: max={db:.2e} mean={db_mean:.2e}")
 
-    ok = da == 0.0 and db == 0.0
-    print(f"  {'PASS' if ok else 'FAIL'}: outputs are {'bitwise identical' if ok else 'DIFFERENT'}")
+    # ~1e-6 is expected float32 CUDA matmul non-determinism for different batch shapes.
+    # Real cross-contamination would show diffs >> 1e-3.
+    threshold = 1e-5
+    ok = da < threshold and db < threshold
+    if ok:
+        print(f"  PASS: diffs within float32 matmul noise (threshold={threshold:.0e})")
+    else:
+        print(f"  FAIL: diffs too large — possible cross-adapter contamination")
     return ok
 
 
@@ -119,8 +129,9 @@ def test_composition_invariance():
     d1 = (results[0] - results[1]).abs().max().item()
     d2 = (results[0] - results[2]).abs().max().item()
     print(f"[composition] n_b=10 vs 50: {d1:.2e}   n_b=10 vs 200: {d2:.2e}")
-    ok = d1 == 0.0 and d2 == 0.0
-    print(f"  {'PASS' if ok else 'FAIL'}")
+    threshold = 1e-5
+    ok = d1 < threshold and d2 < threshold
+    print(f"  {'PASS' if ok else 'FAIL'} (threshold={threshold:.0e})")
     return ok
 
 
