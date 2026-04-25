@@ -683,6 +683,7 @@ def policy_loss_function(
         loss += 0 * logits.sum()
 
     train_rollout_logprob_abs_diff = None
+    _per_adapter_diff = None
     if "rollout_log_probs" in batch and batch["rollout_log_probs"]:
         rollout_log_probs = torch.cat(batch["rollout_log_probs"], dim=0)
         train_rollout_logprob_abs_diff = sum_of_sample_mean((old_log_probs - rollout_log_probs).abs())
@@ -694,15 +695,9 @@ def policy_loss_function(
             _old = batch["log_probs"] if not args.use_rollout_logprobs else batch["rollout_log_probs"]
             _rl = batch["rollout_log_probs"]
             n_adapters = batch.get("n_adapters", max(_slots) + 1)
-            _per_adapter_sum = [0.0] * n_adapters
-            _per_adapter_count = [0] * n_adapters
+            _per_adapter_diff = [0.0] * n_adapters
             for _s, _o, _r in zip(_slots, _old, _rl):
-                _per_adapter_sum[_s] += (_o - _r).abs().mean().item()
-                _per_adapter_count[_s] += 1
-            for _s in range(n_adapters):
-                reported_loss[f"train_rollout_logprob_abs_diff/slot_{_s}"] = (
-                    torch.tensor(_per_adapter_sum[_s], device=logits.device)
-                )
+                _per_adapter_diff[_s] += (_o - _r).abs().mean().item()
 
     reported_loss = {
         "loss": loss.clone().detach(),
@@ -714,6 +709,12 @@ def policy_loss_function(
 
     if train_rollout_logprob_abs_diff is not None:
         reported_loss["train_rollout_logprob_abs_diff"] = train_rollout_logprob_abs_diff.clone().detach()
+
+    if _per_adapter_diff is not None:
+        for _s, _v in enumerate(_per_adapter_diff):
+            reported_loss[f"train_rollout_logprob_abs_diff/slot_{_s}"] = (
+                torch.tensor(_v, device=logits.device)
+            )
 
     if args.use_kl_loss:
         reported_loss["kl_loss"] = kl_loss.clone().detach()
