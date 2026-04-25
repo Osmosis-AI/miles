@@ -692,14 +692,12 @@ def policy_loss_function(
         # TODO: remove once multi-LoRA lgprob diff is resolved; use adapter names instead of slot indices
         _n_adapters = getattr(args, "multi_lora_n_adapters", 0)
         if _n_adapters > 0 and batch.get("adapter_slots") is not None:
-            _slots = batch["adapter_slots"]
-            _old = batch["log_probs"] if not args.use_rollout_logprobs else batch["rollout_log_probs"]
-            _rl = batch["rollout_log_probs"]
-            _lms = batch["loss_masks"]
+            _abs_diff = (old_log_probs - rollout_log_probs).abs()
+            _per_sample = _abs_diff.split(response_lengths, dim=0)
             _per_adapter_diff = [0.0] * _n_adapters
-            for _s, _o, _r, _lm in zip(_slots, _old, _rl, _lms):
-                _d = ((_o - _r).abs() * _lm).sum() / torch.clamp_min(_lm.sum(), 1)
-                _per_adapter_diff[_s] += _d.item()
+            for _s, _d, _lm in zip(batch["adapter_slots"], _per_sample, batch["loss_masks"]):
+                _val = (_d * _lm).sum() / torch.clamp_min(_lm.sum(), 1)
+                _per_adapter_diff[_s] += _val.item()
 
     reported_loss = {
         "loss": loss.clone().detach(),
