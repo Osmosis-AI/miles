@@ -76,10 +76,10 @@ run_training_with_hook() {
        --label-key label \
        --apply-chat-template \
        --rollout-shuffle \
-       --num-rollout 20 \
+       --num-rollout 100 \
        --rollout-batch-size 32 \
        --n-samples-per-prompt 8 \
-       --rollout-max-response-len 1024 \
+       --rollout-max-response-len 4096 \
        --rollout-temperature 1 \
        --global-batch-size 256 \
        \
