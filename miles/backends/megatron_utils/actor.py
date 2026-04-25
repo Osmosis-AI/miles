@@ -417,10 +417,6 @@ class MegatronTrainRayActor(TrainRayActor):
                                 m.stage = "replay_forward"
                             else:
                                 m.stage = "record"
-                    # TODO: remove forloop toggle once grouped GEMM numerical behavior is resolved
-                    if is_multi_lora_enabled(self.args):
-                        from megatron.bridge.peft.multi_lora_layers import set_forloop_forward
-                        set_forloop_forward(self.model, enabled=True)
                     rollout_data.update(
                         self.compute_log_prob(
                             data_iterator,
@@ -428,8 +424,6 @@ class MegatronTrainRayActor(TrainRayActor):
                             store_prefix="",
                         )
                     )
-                    if is_multi_lora_enabled(self.args):
-                        set_forloop_forward(self.model, enabled=False)
                     for m in all_replay_managers:
                         if self._use_rollout_replay(m):
                             m.clear_all_forward()
