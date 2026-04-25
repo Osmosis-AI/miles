@@ -445,6 +445,14 @@ def log_train_step(
         for key, val in extra_metrics.items():
             log_dict_out[f"train/{role_tag}{key}"] = val
 
+    # Compute per-adapter mean diff from raw sum / token count
+    for key in list(log_dict_out.keys()):
+        if "/logprob_diff_sum" in key:
+            ntokens_key = key.replace("/logprob_diff_sum", "/logprob_diff_ntokens")
+            if ntokens_key in log_dict_out and log_dict_out[ntokens_key] > 0:
+                mean_key = key.replace("/logprob_diff_sum", "/logprob_diff_mean")
+                log_dict_out[mean_key] = log_dict_out[key] / log_dict_out[ntokens_key]
+
     log_dict_out["train/step"] = accumulated_step_id
 
     if should_log is None:
