@@ -115,7 +115,13 @@ run_training_with_hook() {
        --attention-softmax-in-fp32 \
        --attention-backend flash \
        \
-       --custom-megatron-before-train-step-hook-path "$HOOK_PATH"
+       --custom-megatron-before-train-step-hook-path "$HOOK_PATH" \
+       \
+       --use-wandb \
+       --wandb-host https://wandb.ai/ \
+       --wandb-team osmosis-staging \
+       --wandb-project miles-multilora \
+       --wandb-group qwen3-4B-test
 }
 
 # ── Dispatch ──────────────────────────────────────────────────────────────
