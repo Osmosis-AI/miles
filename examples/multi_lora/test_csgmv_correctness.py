@@ -15,31 +15,17 @@ import torch
 from dataclasses import dataclass
 
 
+from sglang.srt.model_executor.forward_batch_info import ForwardMode
+
+
 @dataclass
 class FakeForwardBatch:
     batch_size: int
-    forward_mode: "FakeMode"
+    forward_mode: ForwardMode
     extend_seq_lens: torch.Tensor
     extend_seq_lens_cpu: list
     extend_num_tokens: int
     lora_ids: list
-
-    class FakeMode:
-        @staticmethod
-        def is_extend(**kwargs):
-            return True
-        @staticmethod
-        def is_cuda_graph():
-            return False
-        @staticmethod
-        def is_target_verify():
-            return False
-        @staticmethod
-        def is_decode():
-            return False
-        @staticmethod
-        def is_decode_or_idle():
-            return False
 
 
 def torch_reference_lora(x_list, A_weights, B_weights, weight_indices, ranks, scalings, slice_offsets):
@@ -114,7 +100,7 @@ def run_test(num_seqs, seq_lens, num_adapters, ranks_list, input_dim, output_dim
     extend_seq_lens = torch.tensor(seq_lens, dtype=torch.int32, device=device)
     fb = FakeForwardBatch(
         batch_size=num_seqs,
-        forward_mode=FakeForwardBatch.FakeMode(),
+        forward_mode=ForwardMode.EXTEND,
         extend_seq_lens=extend_seq_lens,
         extend_seq_lens_cpu=seq_lens,
         extend_num_tokens=sum(seq_lens),
