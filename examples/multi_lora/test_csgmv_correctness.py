@@ -26,6 +26,12 @@ class FakeForwardBatch:
     extend_seq_lens_cpu: list
     extend_num_tokens: int
     lora_ids: list
+    return_logprob: bool = False
+    top_logprobs_nums: list = None
+
+    def __post_init__(self):
+        if self.top_logprobs_nums is None:
+            self.top_logprobs_nums = [0] * self.batch_size
 
 
 def torch_reference_lora(x_list, A_weights, B_weights, weight_indices, ranks, scalings, slice_offsets):
