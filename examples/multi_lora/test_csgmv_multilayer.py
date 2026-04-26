@@ -319,8 +319,10 @@ def run_test_qkv_gate_up():
                 gu_A[i, s * max_rank + r:(s+1) * max_rank, :] = 0
             gu_B[i, :, r:] = 0
 
-    triton_gu = triton_backend.run_gate_up_lora(x=x, gate_up_lora_a=gu_A, gate_up_lora_b=gu_B)
-    csgmv_gu = csgmv_backend.run_gate_up_lora(x=x, gate_up_lora_a=gu_A, gate_up_lora_b=gu_B)
+    triton_gu = triton_backend.run_gate_up_lora(x=x, gate_up_lora_a=gu_A, gate_up_lora_b=gu_B,
+                                                  output_offset=gu_offsets)
+    csgmv_gu = csgmv_backend.run_gate_up_lora(x=x, gate_up_lora_a=gu_A, gate_up_lora_b=gu_B,
+                                                 output_offset=gu_offsets)
     gu_diff = (triton_gu - csgmv_gu).abs()
     print(f"  gate_up: max={gu_diff.max().item():.2e}  mean={gu_diff.mean().item():.2e}")
 
@@ -388,8 +390,9 @@ def run_test_decode():
         triton_out = simulate_layer(triton_backend, triton_x, A, B, W, slice_offsets)
         csgmv_out = simulate_layer(csgmv_backend, csgmv_x, A, B, W, slice_offsets)
         max_diffs.append((triton_out - csgmv_out).abs().max().item())
-        triton_x = triton_out
-        csgmv_x = csgmv_out
+        # Normalize to prevent value explosion over many steps
+        triton_x = triton_out / (triton_out.norm(dim=-1, keepdim=True) + 1e-6) * 0.1
+        csgmv_x = csgmv_out / (csgmv_out.norm(dim=-1, keepdim=True) + 1e-6) * 0.1
 
     print(f"  step   0: max_diff={max_diffs[0]:.2e}")
     print(f"  step  49: max_diff={max_diffs[49]:.2e}")
