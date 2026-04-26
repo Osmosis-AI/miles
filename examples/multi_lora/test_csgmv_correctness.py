@@ -26,10 +26,19 @@ class FakeForwardBatch:
 
     class FakeMode:
         @staticmethod
-        def is_extend():
+        def is_extend(**kwargs):
             return True
         @staticmethod
         def is_cuda_graph():
+            return False
+        @staticmethod
+        def is_target_verify():
+            return False
+        @staticmethod
+        def is_decode():
+            return False
+        @staticmethod
+        def is_decode_or_idle():
             return False
 
 
