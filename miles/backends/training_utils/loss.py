@@ -683,39 +683,9 @@ def policy_loss_function(
         loss += 0 * logits.sum()
 
     train_rollout_logprob_abs_diff = None
-    _per_adapter_diff_sum = None
     if "rollout_log_probs" in batch and batch["rollout_log_probs"]:
         rollout_log_probs = torch.cat(batch["rollout_log_probs"], dim=0)
         train_rollout_logprob_abs_diff = sum_of_sample_mean((old_log_probs - rollout_log_probs).abs())
-
-        # Per-adapter lgprob diff tracking for multi-LoRA.
-        # Emits raw sums and token counts per adapter. After aggregate_train_losses
-        # divides everything by total_tokens, compute the per-adapter mean as:
-        #   mean_diff_s = (logprob_diff_sum/slot_s) / (logprob_diff_ntokens/slot_s)
-        # TODO: remove once multi-LoRA lgprob diff is resolved
-        _n_adapters = getattr(args, "multi_lora_n_adapters", 0)
-        if _n_adapters > 0 and batch.get("adapter_slots") is not None:
-            _abs_diff = (old_log_probs - rollout_log_probs).abs()
-            _per_sample_diff = _abs_diff.split(response_lengths, dim=0)
-            _per_adapter_diff_sum = [0.0] * _n_adapters
-            _per_adapter_ntokens = [0.0] * _n_adapters
-            _per_adapter_old_lp = [0.0] * _n_adapters
-            _per_adapter_rollout_lp = [0.0] * _n_adapters
-            _per_adapter_resp_len_sum = [0.0] * _n_adapters
-            _per_adapter_count = [0.0] * _n_adapters
-            for _s, _d, _lm, _o_lp, _r_lp, _rlen in zip(
-                batch["adapter_slots"], _per_sample_diff, batch["loss_masks"],
-                old_log_probs.split(response_lengths, dim=0),
-                rollout_log_probs.split(response_lengths, dim=0),
-                response_lengths,
-            ):
-                _mask_sum = _lm.sum()
-                _per_adapter_diff_sum[_s] += (_d * _lm).sum().item()
-                _per_adapter_ntokens[_s] += _mask_sum.item()
-                _per_adapter_old_lp[_s] += (_o_lp * _lm).sum().item()
-                _per_adapter_rollout_lp[_s] += (_r_lp * _lm).sum().item()
-                _per_adapter_resp_len_sum[_s] += _rlen
-                _per_adapter_count[_s] += 1.0
 
     reported_loss = {
         "loss": loss.clone().detach(),
@@ -727,27 +697,6 @@ def policy_loss_function(
 
     if train_rollout_logprob_abs_diff is not None:
         reported_loss["train_rollout_logprob_abs_diff"] = train_rollout_logprob_abs_diff.clone().detach()
-
-    if _per_adapter_diff_sum is not None:
-        for _s in range(_n_adapters):
-            reported_loss[f"slot_{_s}/logprob_diff_sum"] = (
-                torch.tensor(_per_adapter_diff_sum[_s], device=logits.device)
-            )
-            reported_loss[f"slot_{_s}/logprob_diff_ntokens"] = (
-                torch.tensor(_per_adapter_ntokens[_s], device=logits.device)
-            )
-            reported_loss[f"slot_{_s}/old_log_probs"] = (
-                torch.tensor(_per_adapter_old_lp[_s], device=logits.device)
-            )
-            reported_loss[f"slot_{_s}/rollout_log_probs"] = (
-                torch.tensor(_per_adapter_rollout_lp[_s], device=logits.device)
-            )
-            reported_loss[f"slot_{_s}/resp_len_sum"] = (
-                torch.tensor(_per_adapter_resp_len_sum[_s], device=logits.device)
-            )
-            reported_loss[f"slot_{_s}/sample_count"] = (
-                torch.tensor(_per_adapter_count[_s], device=logits.device)
-            )
 
     if args.use_kl_loss:
         reported_loss["kl_loss"] = kl_loss.clone().detach()

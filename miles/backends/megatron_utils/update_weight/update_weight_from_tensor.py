@@ -281,19 +281,6 @@ class UpdateWeightFromTensor:
             lora_config["r"] = adapter_rank
             lora_config["lora_alpha"] = cfg.get("alpha", self.args.lora_alpha)
 
-            # TODO: remove debug weight comparison once multi-LoRA sync is validated
-            from megatron.bridge.peft.multi_lora_layers import _iter_multi_lora_modules
-            for _dbg_i, _dbg_m in enumerate(_iter_multi_lora_modules(self.model)):
-                if _dbg_i > 0:
-                    break
-                _dbg_gpu = _dbg_m.adapters[idx].linear_in.weight.data
-                _dbg_cpu_dict = megatron_local_weights
-                for _dbg_k, _dbg_v in _dbg_cpu_dict.items():
-                    if f"adapters.{idx}.linear_in.weight" in _dbg_k:
-                        _dbg_diff = (_dbg_gpu.float() - _dbg_v.float().to(_dbg_gpu.device)).abs().max().item()
-                        logger.info(f"[debug] adapter {idx} GPU vs CPU max diff: {_dbg_diff:.6e}")
-                        break
-
             logger.info(f"[multi_lora_sync] Exposing adapter {adapter_name} (slot {idx}, rank {adapter_rank})")
             with expose_adapter_slot(self.model, idx):
                 megatron_local_weights = self.weights_getter()
