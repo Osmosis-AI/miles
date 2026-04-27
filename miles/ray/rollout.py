@@ -761,7 +761,9 @@ class RolloutManager:
         # Multi-LoRA: resolve adapter names to slot indices and sort partitions.
         adapter_names = data.get("adapter_names")
         if adapter_names is not None:
-            active = ray.get(self.args.multi_lora_controller.active_runs.remote())
+            from miles.ray.multi_lora_controller import get_multi_lora_controller
+
+            active = ray.get(get_multi_lora_controller().active_runs.remote())
             slot_for = {name: cfg["slot"] for name, cfg in active.items()}
             data["adapter_slots"] = [slot_for[name] for name in adapter_names]
             partitions = [

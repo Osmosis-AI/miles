@@ -166,15 +166,17 @@ def deregister_adapter(
     args,
     model,
     optimizer,
-    controller,
     ipc_engine=None,
     ipc_gather_src=None,
 ):
     """Full cleanup for an exhausted adapter: save, unload, reset, deregister."""
     from megatron.bridge.peft.multi_lora_layers import unregister_adapter
 
+    from miles.ray.multi_lora_controller import get_multi_lora_controller
+
     from ..multi_lora import zero_optimizer_state_for_adapter
 
+    controller = get_multi_lora_controller()
     adapter_configs = ray.get(controller.active_runs.remote())
     if name not in adapter_configs:
         return

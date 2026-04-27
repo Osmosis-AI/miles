@@ -3,6 +3,10 @@
 The controller is the single source of truth for which adapters are active.
 Training workers, the RolloutManager, and SGLang engines query it.
 
+The driver creates it once via ``create_multi_lora_controller`` and any
+process can then look it up with ``get_multi_lora_controller`` (mirrors the
+named-actor pattern used by ``miles.utils.prometheus_utils``).
+
 Adapters are registered explicitly via register_run(path). When locked,
 register/deregister calls are buffered and applied on unlock, preventing
 race conditions during training steps.
@@ -16,6 +20,18 @@ import ray
 from miles.utils.adapter_config import parse_adapter_yaml
 
 logger = logging.getLogger(__name__)
+
+CONTROLLER_NAME = "miles_multi_lora_controller"
+
+
+def create_multi_lora_controller(max_adapters: int, max_rank: int):
+    """Create the named singleton controller. Call once from the driver."""
+    return MultiLoRAController.options(name=CONTROLLER_NAME).remote(max_adapters, max_rank)
+
+
+def get_multi_lora_controller():
+    """Return the named controller handle. Call from anywhere after creation."""
+    return ray.get_actor(CONTROLLER_NAME)
 
 
 @ray.remote(num_cpus=0)

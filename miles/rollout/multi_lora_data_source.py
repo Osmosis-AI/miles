@@ -15,6 +15,7 @@ from argparse import Namespace
 
 import ray
 
+from miles.ray.multi_lora_controller import get_multi_lora_controller
 from miles.rollout.data_source import DataSource, RolloutDataSource
 from miles.utils.types import Sample
 
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 class MultiLoRADataSource(DataSource):
     def __init__(self, args: Namespace):
         self.args = args
-        self.controller = args.multi_lora_controller
+        self.controller = get_multi_lora_controller()
         self.sources: dict[str, RolloutDataSource] = {}
         self.adapter_configs: dict[str, dict] = {}
         self.epoch_counts: dict[str, int] = {}
