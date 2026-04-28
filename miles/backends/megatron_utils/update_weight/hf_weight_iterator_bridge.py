@@ -73,6 +73,7 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
                     for n, t in named_weights
                     if is_lora_weight_name(n) and _is_rollout_lora_weight_name(n)
                 )
+                named_weights = _coalesce_qkv_lora_params_for_sglang(self.args, list(named_weights))
 
             yield from chunk_named_params_by_size(named_weights, chunk_size=self.args.update_weight_buffer_size)
 
@@ -155,6 +156,65 @@ def _drop_qwen3_5_q_gate_rows(args, hf_param_name, param):
         ],
         dim=0,
     ).contiguous()
+
+
+def _coalesce_qkv_lora_params_for_sglang(args, named_weights):
+    if not (getattr(args, "attention_output_gate", False) and _uses_qkv_lora_target(args)):
+        return named_weights
+
+    grouped = {}
+    for name, tensor in named_weights:
+        projection = _qkv_projection_from_name(name)
+        if projection is None:
+            continue
+        qkv_name = name.replace(f".{projection}.", ".qkv_proj.")
+        grouped.setdefault(qkv_name, {})[projection] = tensor
+
+    result = []
+    emitted = set()
+    for name, tensor in named_weights:
+        projection = _qkv_projection_from_name(name)
+        if projection is None:
+            result.append((name, tensor))
+            continue
+
+        qkv_name = name.replace(f".{projection}.", ".qkv_proj.")
+        group = grouped.get(qkv_name, {})
+        if set(group) != {"q_proj", "k_proj", "v_proj"}:
+            result.append((name, tensor))
+            continue
+
+        if qkv_name in emitted:
+            continue
+        emitted.add(qkv_name)
+
+        if ".lora_B." in name:
+            result.append(
+                (
+                    qkv_name,
+                    torch.cat([group["q_proj"], group["k_proj"], group["v_proj"]], dim=0).contiguous(),
+                )
+            )
+        else:
+            result.append((qkv_name, group["q_proj"]))
+
+    return result
+
+
+def _uses_qkv_lora_target(args) -> bool:
+    target_modules = getattr(args, "sglang_lora_target_modules", None)
+    if target_modules is None:
+        return False
+    if isinstance(target_modules, str):
+        target_modules = [m.strip() for m in target_modules.split(",") if m.strip()]
+    return "qkv_proj" in target_modules
+
+
+def _qkv_projection_from_name(name: str) -> str | None:
+    for projection in ("q_proj", "k_proj", "v_proj"):
+        if f".{projection}." in name:
+            return projection
+    return None
 
 
 def _is_rollout_lora_weight_name(name: str) -> bool:
