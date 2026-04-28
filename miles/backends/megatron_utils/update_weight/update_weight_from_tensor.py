@@ -190,8 +190,10 @@ class UpdateWeightFromTensor:
 
         megatron_local_weights = self.weights_getter()
 
-        # For LoRA+distributed: base weights are frozen, skip after first round.
-        if not (self.is_lora and self.use_distribute and self._lora_base_synced):
+        # LoRA freezes the base model. The rollout engine already serves the same
+        # HF checkpoint, so syncing only adapter tensors avoids merging adapters
+        # into base weights before SGLang applies the LoRA dynamically.
+        if not self.is_lora:
             for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
                 megatron_local_weights, weight_type="base"
             ):

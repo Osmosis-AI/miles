@@ -216,6 +216,42 @@ class TestUpdateWeightsZeroChunks:
         with pytest.raises(RuntimeError, match="zero chunks"):
             updater.update_weights()
 
+    @patch(f"{_UW_MODULE}.get_gloo_group", return_value=MagicMock())
+    @patch(f"{_UW_MODULE}.ray")
+    @patch(f"{_UW_MODULE}.dist")
+    @patch(f"{_UW_MODULE}.HfWeightIteratorBase")
+    def test_lora_update_skips_base_weight_sync(self, mock_iter_base, mock_dist, mock_ray, mock_gloo):
+        from miles.backends.megatron_utils.update_weight.update_weight_from_tensor import UpdateWeightFromTensor
+
+        mock_dist.get_world_size.return_value = 1
+        mock_dist.get_rank.return_value = 0
+        mock_dist.new_group.return_value = MagicMock()
+
+        iterator = MagicMock()
+        iterator.get_hf_weight_chunks.side_effect = lambda _weights, weight_type: iter(
+            [SAMPLE_LORA_WEIGHTS] if weight_type == "lora" else SAMPLE_BASE_ONLY_WEIGHTS
+        )
+        mock_iter_base.create.return_value = iterator
+
+        args = _make_args()
+        updater = UpdateWeightFromTensor(
+            args=args,
+            model=[MagicMock()],
+            weights_getter=lambda: {},
+            model_name="qwen",
+            quantization_config=None,
+            is_lora=True,
+        )
+        updater.rollout_engines = [MagicMock()]
+        updater.use_distribute = False
+
+        with patch.object(updater, "_send_base_params") as mock_send_base:
+            with patch.object(updater, "_send_lora_params", return_value=([], [])) as mock_send_lora:
+                updater.update_weights()
+
+        mock_send_base.assert_not_called()
+        mock_send_lora.assert_called_once_with(SAMPLE_LORA_WEIGHTS)
+
     @patch("miles.backends.megatron_utils.update_weight.common.ray")
     @patch(f"{_UW_MODULE}.get_gloo_group", return_value=MagicMock())
     @patch(f"{_UW_MODULE}.ray")

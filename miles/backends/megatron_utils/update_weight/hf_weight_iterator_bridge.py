@@ -1,5 +1,7 @@
 import dataclasses
 
+import torch
+
 from miles.backends.megatron_utils.lora_utils import is_lora_weight_name
 from miles.utils import megatron_bridge_utils
 from miles.utils.iter_utils import chunk_named_params_by_size
@@ -42,7 +44,18 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
             named_weights = (
                 (
                     hf_param_name,
-                    postprocess_hf_param(
+                    _postprocess_bridge_lora_param(
+                        args=self.args,
+                        hf_param_name=hf_param_name,
+                        param=postprocess_hf_param(
+                            args=self.args,
+                            megatron_param_name=megatron_param_name,
+                            hf_param_name=hf_param_name,
+                            param=weight,
+                        ),
+                    )
+                    if weight_type == "lora"
+                    else postprocess_hf_param(
                         args=self.args,
                         megatron_param_name=megatron_param_name,
                         hf_param_name=hf_param_name,
@@ -55,7 +68,11 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
             if weight_type == "base":
                 named_weights = ((n, t) for n, t in named_weights if not is_lora_weight_name(n))
             elif weight_type == "lora":
-                named_weights = ((n, t) for n, t in named_weights if is_lora_weight_name(n))
+                named_weights = (
+                    (n, t)
+                    for n, t in named_weights
+                    if is_lora_weight_name(n) and _is_rollout_lora_weight_name(n)
+                )
 
             yield from chunk_named_params_by_size(named_weights, chunk_size=self.args.update_weight_buffer_size)
 
@@ -75,6 +92,84 @@ def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict):
         return dataclasses.replace(task, param_weight=new_param_weight)
 
     return _MapWithLen(_handle_one, vanilla_conversion_tasks)
+
+
+def _postprocess_bridge_lora_param(args, hf_param_name, param):
+    """Normalize Bridge adapter tensors to the PEFT layout expected by SGLang."""
+    if ".lora_B." not in hf_param_name or param.ndim < 2:
+        return param
+
+    lora_rank = getattr(args, "lora_rank", None)
+    if lora_rank is None:
+        return param
+
+    # Bridge can export LoRA B as rank-first ([r, out] or [..., r, out]).
+    # SGLang's tensor loader expects PEFT layout ([out, r]) before TP slicing.
+    if param.shape[-2] == lora_rank and param.shape[-1] != lora_rank:
+        param = param.transpose(-1, -2).contiguous()
+
+    if (
+        getattr(args, "attention_output_gate", False)
+        and (".qkv_proj.lora_B." in hf_param_name or ".q_proj.lora_B." in hf_param_name)
+        and param.ndim == 2
+    ):
+        return _drop_qwen3_5_q_gate_rows(args, hf_param_name, param)
+
+    return param
+
+
+def _drop_qwen3_5_q_gate_rows(args, hf_param_name, param):
+    """Convert Qwen3.5 gated QGKV LoRA B rows to SGLang's QKV-only layout."""
+    try:
+        head_dim = args.kv_channels if args.kv_channels is not None else args.hidden_size // args.num_attention_heads
+        value_num_per_group = args.num_attention_heads // args.num_query_groups
+    except AttributeError:
+        return param
+
+    if ".q_proj.lora_B." in hf_param_name:
+        rows_per_group = 2 * value_num_per_group * head_dim
+    else:
+        rows_per_group = (2 * value_num_per_group + 2) * head_dim
+    if param.shape[0] % rows_per_group != 0:
+        raise ValueError(
+            f"Cannot convert gated QKV LoRA tensor {hf_param_name}: "
+            f"shape={tuple(param.shape)} is not divisible by rows_per_group={rows_per_group}"
+        )
+
+    num_groups = param.shape[0] // rows_per_group
+    if ".q_proj.lora_B." in hf_param_name:
+        q_with_gate = param.view(num_groups, 2 * value_num_per_group, head_dim, param.shape[1])
+        return q_with_gate.view(num_groups, 2, value_num_per_group, head_dim, param.shape[1])[:, 0].reshape(
+            -1, param.shape[1]
+        ).contiguous()
+
+    qgkv = param.view(num_groups, 2 * value_num_per_group + 2, head_dim, param.shape[1])
+    q_with_gate, k, v = qgkv.split([2 * value_num_per_group, 1, 1], dim=1)
+    q = q_with_gate.view(num_groups, 2, value_num_per_group, head_dim, param.shape[1])[:, 0]
+
+    return torch.cat(
+        [
+            q.reshape(-1, param.shape[1]),
+            k.reshape(-1, param.shape[1]),
+            v.reshape(-1, param.shape[1]),
+        ],
+        dim=0,
+    ).contiguous()
+
+
+def _is_rollout_lora_weight_name(name: str) -> bool:
+    """Keep adapter tensors that correspond to the language rollout model."""
+    excluded_fragments = (
+        "vision_model.",
+        ".vision_model.",
+        "visual.",
+        ".visual.",
+        "vision_tower.",
+        ".vision_tower.",
+        ".mtp.",
+        "mtp.",
+    )
+    return not any(fragment in name for fragment in excluded_fragments)
 
 
 class _MapWithLen:

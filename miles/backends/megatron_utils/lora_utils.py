@@ -215,6 +215,12 @@ def convert_target_modules_to_hf(megatron_modules: list[str]) -> list[str]:
     return hf_modules
 
 
+def _normalize_module_list(modules: str | list[str] | tuple[str, ...] | set[str]) -> list[str]:
+    if isinstance(modules, str):
+        return [m.strip() for m in modules.split(",") if m.strip()]
+    return list(modules)
+
+
 # ---------------------------------------------------------------------------
 # Model setup helpers (used by model.py)
 # ---------------------------------------------------------------------------
@@ -305,6 +311,7 @@ def save_lora_checkpoint(
 
     from megatron.bridge import AutoBridge
 
+    import miles_plugins.megatron_bridge  # noqa: F401
     from miles.utils import megatron_bridge_utils
 
     save_path = Path(save_dir)
@@ -490,11 +497,15 @@ def _load_training_state(
 
 def build_lora_sync_config(args: Namespace) -> dict[str, Any]:
     """Build LoRA config dict for syncing weights to SGLang engines."""
-    target_modules_hf = (
-        convert_target_modules_to_hf(list(args.target_modules))
-        if args.target_modules
-        else ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-    )
+    sglang_target_modules = getattr(args, "sglang_lora_target_modules", None)
+    if sglang_target_modules:
+        target_modules_hf = _normalize_module_list(sglang_target_modules)
+    else:
+        target_modules_hf = (
+            convert_target_modules_to_hf(list(args.target_modules))
+            if args.target_modules
+            else ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+        )
     return {
         "peft_type": "LORA",
         "r": args.lora_rank,

@@ -82,6 +82,8 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
     from megatron.bridge.training.config import DistributedDataParallelConfig
     from transformers import AutoConfig
 
+    import miles_plugins.megatron_bridge  # noqa: F401
+
     hf_config = AutoConfig.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
     bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)
     provider = bridge.to_megatron_provider(load_weights=False)
@@ -93,6 +95,7 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
     provider.sequence_parallel = args.sequence_parallel
     provider.virtual_pipeline_model_parallel_size = args.virtual_pipeline_model_parallel_size
     provider.context_parallel_size = args.context_parallel_size
+    provider.calculate_per_token_loss = args.calculate_per_token_loss
     provider.variable_seq_lengths = True
     provider.moe_token_dispatcher_type = "alltoall"
     provider.moe_router_load_balancing_type = "none"

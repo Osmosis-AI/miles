@@ -736,6 +736,7 @@ def save_hf_model(args, rollout_id: int, model: Sequence[DDP]) -> None:
     try:
         from megatron.bridge import AutoBridge
 
+        import miles_plugins.megatron_bridge  # noqa: F401
         from miles.utils.megatron_bridge_utils import patch_megatron_model
 
         path = Path(args.save_hf.format(rollout_id=rollout_id))

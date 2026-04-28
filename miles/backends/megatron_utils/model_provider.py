@@ -89,6 +89,8 @@ def get_model_provider_func(
     if args.megatron_to_hf_mode == "bridge":
         from megatron.bridge import AutoBridge
 
+        import miles_plugins.megatron_bridge  # noqa: F401
+
         bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)
         provider = bridge.to_megatron_provider(load_weights=False)
         # TODO: we should not manually set this...
@@ -98,6 +100,7 @@ def get_model_provider_func(
         provider.expert_tensor_parallel_size = args.expert_tensor_parallel_size
         provider.sequence_parallel = args.sequence_parallel
         provider.context_parallel_size = args.context_parallel_size
+        provider.calculate_per_token_loss = args.calculate_per_token_loss
         provider.attention_softmax_in_fp32 = args.attention_softmax_in_fp32
         provider.variable_seq_lengths = args.variable_seq_lengths
         if hasattr(args, "moe_token_dispatcher_type"):

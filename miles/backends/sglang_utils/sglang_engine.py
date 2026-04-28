@@ -658,7 +658,11 @@ def _compute_server_args(
         kwargs["enable_lora"] = True
         kwargs["max_loras_per_batch"] = 1
         kwargs["max_lora_rank"] = max(getattr(args, "lora_rank", 0), 1)
-        kwargs["lora_target_modules"] = convert_target_modules_to_hf(args.target_modules)
+        kwargs["lora_target_modules"] = (
+            args.sglang_lora_target_modules
+            if getattr(args, "sglang_lora_target_modules", None)
+            else convert_target_modules_to_hf(args.target_modules)
+        )
 
         if args.lora_adapter_path is not None:
             kwargs["lora_paths"] = {LORA_ADAPTER_NAME: args.lora_adapter_path}

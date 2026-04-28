@@ -330,6 +330,17 @@ class TestBuildLoraSyncConfig:
         assert config["target_modules"] == ["q_proj", "k_proj"]
         assert config["r"] == 8
 
+    def test_sglang_target_modules_override_adapter_config(self):
+        args = Namespace(
+            lora_rank=8,
+            lora_alpha=8,
+            lora_dropout=0.0,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+            sglang_lora_target_modules=["qkv_proj", "o_proj"],
+        )
+        config = build_lora_sync_config(args)
+        assert config["target_modules"] == ["qkv_proj", "o_proj"]
+
 
 # ---------------------------------------------------------------------------
 # LORA_ADAPTER_NAME constant
