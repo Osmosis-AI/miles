@@ -117,9 +117,9 @@ class MegatronTrainRayActor(TrainRayActor):
 
             from .multi_lora import initialize_multi_lora_model_and_optimizer
 
-            snapshot = ray.get(get_multi_lora_controller().snapshot.remote())
+            adapter_configs = ray.get(get_multi_lora_controller().adapter_configs.remote())
             (self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id) = (
-                initialize_multi_lora_model_and_optimizer(args, snapshot.entries, role)
+                initialize_multi_lora_model_and_optimizer(args, adapter_configs, role)
             )
         else:
             (self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id) = (
@@ -485,11 +485,13 @@ class MegatronTrainRayActor(TrainRayActor):
 
             from .update_weight.multi_lora_sync import deregister_adapter
 
-            snapshot = ray.get(get_multi_lora_controller().snapshot.remote())
-            for name in snapshot.exhausted:
+            adapter_configs = ray.get(get_multi_lora_controller().adapter_configs.remote())
+            for name, config in adapter_configs.items():
+                if not config.exhausted:
+                    continue
                 deregister_adapter(
                     name=name,
-                    entry=snapshot.entries[name],
+                    config=config,
                     rollout_id=rollout_id,
                     args=self.args,
                     model=self.model,
@@ -517,8 +519,8 @@ class MegatronTrainRayActor(TrainRayActor):
 
             from .update_weight.multi_lora_sync import save_multi_lora_checkpoints
 
-            snapshot = ray.get(get_multi_lora_controller().snapshot.remote())
-            save_multi_lora_checkpoints(self.args, self.model, rollout_id, snapshot.entries)
+            adapter_configs = ray.get(get_multi_lora_controller().adapter_configs.remote())
+            save_multi_lora_checkpoints(self.args, self.model, rollout_id, adapter_configs)
         else:
             save(rollout_id, self.model, self.optimizer, self.opt_param_scheduler)
 

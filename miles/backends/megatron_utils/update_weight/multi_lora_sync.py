@@ -19,7 +19,8 @@ import ray
 import torch
 import torch.distributed as dist
 
-from miles.ray.multi_lora_controller import AdapterEntry, get_multi_lora_controller
+from miles.ray.multi_lora_controller import get_multi_lora_controller
+from miles.utils.adapter_config import AdapterConfig
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ def save_multi_lora_checkpoints(
     args,
     model,
     iteration: int,
-    adapter_entries: Mapping[str, AdapterEntry],
+    adapter_configs: Mapping[str, AdapterConfig],
 ):
     """Save per-adapter checkpoints to each adapter's directory."""
     from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
@@ -61,12 +62,12 @@ def save_multi_lora_checkpoints(
     tp_rank = mpu.get_tensor_model_parallel_rank()
     pp_rank = mpu.get_pipeline_model_parallel_rank()
 
-    for adapter_name, entry in adapter_entries.items():
-        ckpt_dir = entry.config.dir / "checkpoints" / f"step_{iteration}"
+    for adapter_name, config in adapter_configs.items():
+        ckpt_dir = config.dir / "checkpoints" / f"step_{iteration}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
         adapter_state = {}
-        with expose_adapter_slot(model, entry.slot):
+        with expose_adapter_slot(model, config.slot):
             iterator = HfWeightIteratorBridge(args=args, model=model, model_name=None, quantization_config=None, is_lora=True)
             for hf_named_tensors in iterator.get_hf_weight_chunks({}):
                 for hf_name, weight in hf_named_tensors:
@@ -79,7 +80,7 @@ def save_multi_lora_checkpoints(
 
 def deregister_adapter(
     name: str,
-    entry: AdapterEntry,
+    config: AdapterConfig,
     rollout_id: int,
     args,
     model,
@@ -89,15 +90,15 @@ def deregister_adapter(
 ):
     """Full cleanup for an exhausted adapter: save, unload, reset, deregister.
 
-    Caller must pass the ``AdapterEntry`` from the snapshot they're processing —
-    this function only writes to the controller (via ``deregister_run``) and
-    does not re-snapshot.
+    Caller passes the ``AdapterConfig`` they're already iterating over — this
+    function only writes to the controller (via ``deregister_run``) and does
+    not re-fetch the adapter set.
     """
     from megatron.bridge.peft.multi_lora_layers import unregister_adapter
 
     from ..multi_lora import zero_optimizer_state_for_adapter
 
-    save_multi_lora_checkpoints(args, model, rollout_id, {name: entry})
+    save_multi_lora_checkpoints(args, model, rollout_id, {name: config})
     logger.info(f"Saved final checkpoint for adapter '{name}'")
 
     if ipc_engine is not None and dist.get_rank() == ipc_gather_src:
@@ -107,10 +108,10 @@ def deregister_adapter(
             pass
     logger.info(f"Unloaded adapter '{name}' from SGLang")
 
-    unregister_adapter(model, entry.slot)
-    logger.info(f"Reset layer weights for adapter '{name}' (slot {entry.slot})")
+    unregister_adapter(model, config.slot)
+    logger.info(f"Reset layer weights for adapter '{name}' (slot {config.slot})")
 
-    zero_optimizer_state_for_adapter(optimizer, model, entry.slot)
+    zero_optimizer_state_for_adapter(optimizer, model, config.slot)
     optimizer.reload_model_params()
 
     ray.get(get_multi_lora_controller().deregister_run.remote(name))

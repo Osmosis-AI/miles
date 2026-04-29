@@ -15,7 +15,7 @@ from typing import Mapping
 
 import torch
 
-from miles.ray.multi_lora_controller import AdapterEntry
+from miles.utils.adapter_config import AdapterConfig
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ def build_multi_lora_model(args: Namespace):
 
 def initialize_multi_lora_model_and_optimizer(
     args: Namespace,
-    adapter_entries: Mapping[str, AdapterEntry],
+    adapter_configs: Mapping[str, AdapterConfig],
     role: str = "actor",
 ):
     """Drop-in alternative to initialize_model_and_optimizer for multi-LoRA.
@@ -164,13 +164,13 @@ def initialize_multi_lora_model_and_optimizer(
     # Register adapters and load per-adapter checkpoints
     from megatron.bridge.peft.multi_lora_layers import load_adapter, register_adapter
 
-    for name, entry in adapter_entries.items():
-        register_adapter(model, entry.slot, rank=entry.config.rank, alpha=entry.config.alpha)
-        ckpt = find_latest_checkpoint(entry.config.dir / "checkpoints")
+    for name, config in adapter_configs.items():
+        register_adapter(model, config.slot, rank=config.rank, alpha=config.alpha)
+        ckpt = find_latest_checkpoint(config.dir / "checkpoints")
         if ckpt:
             logger.info(f"Loading adapter '{name}' from {ckpt}")
             state_dict = torch.load(ckpt, map_location="cpu", weights_only=True)
-            load_adapter(model, entry.slot, state_dict)
+            load_adapter(model, config.slot, state_dict)
 
     # Sync bf16 model params → fp32 optimizer main params so the rank
     # masking applied by register_adapter is reflected in the fp32 copies.

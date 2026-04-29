@@ -304,14 +304,14 @@ class UpdateWeightFromTensor:
 
         from .multi_lora_sync import slice_lora_to_rank
 
-        snapshot = ray.get(get_multi_lora_controller().snapshot.remote())
-        for adapter_name, entry in snapshot.entries.items():
-            adapter_rank = entry.config.rank
+        adapter_configs = ray.get(get_multi_lora_controller().adapter_configs.remote())
+        for adapter_name, config in adapter_configs.items():
+            adapter_rank = config.rank
             lora_config = build_lora_sync_config(self.args)
             lora_config["r"] = adapter_rank
-            lora_config["lora_alpha"] = entry.config.alpha
+            lora_config["lora_alpha"] = config.alpha
 
-            with expose_adapter_slot(self.model, entry.slot):
+            with expose_adapter_slot(self.model, config.slot):
                 megatron_local_weights = self.weights_getter()
                 for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
                     megatron_local_weights, weight_type="lora"

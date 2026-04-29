@@ -1,7 +1,7 @@
 """Multi-LoRA data source that wraps per-adapter data sources.
 
 Implements the DataSource interface. Queries the MultiLoRAController for the
-current adapter snapshot, lazily creates/removes per-adapter ``RolloutDataSource``
+current adapter configs, lazily creates/removes per-adapter ``RolloutDataSource``
 instances, and round-robins ``get_samples()`` across them. Each emitted sample is
 stamped with an ``AdapterRef`` (identity + slot) and a ``RewardSpec`` (per-adapter
 reward dispatch); the same ref instances are shared across all samples of a
@@ -17,9 +17,10 @@ from argparse import Namespace
 
 import ray
 
-from miles.ray.multi_lora_controller import AdapterEntry, get_multi_lora_controller
+from miles.ray.multi_lora_controller import get_multi_lora_controller
 from miles.rollout.data_source import DataSource, RolloutDataSource
-from miles.utils.types import Sample
+from miles.utils.adapter_config import AdapterConfig
+from miles.utils.types import AdapterRef, RewardSpec, Sample
 
 logger = logging.getLogger(__name__)
 
@@ -29,41 +30,39 @@ class MultiLoRADataSource(DataSource):
         self.args = args
         self.controller = get_multi_lora_controller()
         self.sources: dict[str, RolloutDataSource] = {}
-        self.entries: dict[str, AdapterEntry] = {}
+        self.configs: dict[str, AdapterConfig] = {}
         self.epoch_counts: dict[str, int] = {}
-        self._reconcile(self._snapshot_entries())
+        self._reconcile(self._fetch_configs())
 
-    def _snapshot_entries(self) -> dict[str, AdapterEntry]:
-        snapshot = ray.get(self.controller.snapshot.remote())
-        return dict(snapshot.entries)
+    def _fetch_configs(self) -> dict[str, AdapterConfig]:
+        return ray.get(self.controller.adapter_configs.remote())
 
-    def _reconcile(self, entries: dict[str, AdapterEntry]) -> None:
+    def _reconcile(self, configs: dict[str, AdapterConfig]) -> None:
         """Add data sources for newly-registered adapters; drop ones no longer active."""
         for name in list(self.sources):
-            if name not in entries:
+            if name not in configs:
                 del self.sources[name]
-                del self.entries[name]
+                del self.configs[name]
                 del self.epoch_counts[name]
                 logger.info(f"Removed data source for adapter '{name}'")
 
-        for name, entry in entries.items():
+        for name, config in configs.items():
             if name not in self.sources:
-                self.sources[name] = self._create_adapter_source(entry)
-                self.entries[name] = entry
+                self.sources[name] = self._create_adapter_source(config)
+                self.configs[name] = config
                 self.epoch_counts[name] = 0
-                logger.info(f"Created data source for adapter '{name}' from {entry.config.data}")
+                logger.info(f"Created data source for adapter '{name}' from {config.data}")
 
-    def _create_adapter_source(self, entry: AdapterEntry) -> RolloutDataSource:
-        cfg = entry.config
+    def _create_adapter_source(self, config: AdapterConfig) -> RolloutDataSource:
         adapter_args = copy.copy(self.args)
-        adapter_args.prompt_data = cfg.data
-        adapter_args.input_key = cfg.input_key or self.args.input_key
-        adapter_args.label_key = cfg.label_key or self.args.label_key
+        adapter_args.prompt_data = config.data
+        adapter_args.input_key = config.input_key or self.args.input_key
+        adapter_args.label_key = config.label_key or self.args.label_key
         return RolloutDataSource(adapter_args)
 
     def get_samples(self, num_samples: int) -> list[list[Sample]]:
-        snapshot = ray.get(self.controller.snapshot.remote())
-        self._reconcile(dict(snapshot.entries))
+        configs = self._fetch_configs()
+        self._reconcile(configs)
 
         if not self.sources:
             return []
@@ -72,10 +71,13 @@ class MultiLoRADataSource(DataSource):
         per_adapter = num_samples // len(adapter_names)
         remainder = num_samples % len(adapter_names)
 
-        # Build refs once per adapter so all samples of the same adapter share
-        # the same instance (pickle memoizes by identity).
-        refs = {name: snapshot.ref(name) for name in adapter_names}
-        reward_specs = {name: snapshot.reward_spec(name) for name in adapter_names}
+        # Build refs/reward_specs once per adapter so all samples of the same adapter
+        # share the same instance (pickle memoizes by identity).
+        refs = {name: AdapterRef(name=name, slot=configs[name].slot) for name in adapter_names}
+        reward_specs = {
+            name: RewardSpec(rm_type=configs[name].rm_type, custom_rm_path=configs[name].custom_rm_path)
+            for name in adapter_names
+        }
 
         all_samples: list[list[Sample]] = []
         exhausted: list[str] = []
@@ -86,14 +88,14 @@ class MultiLoRADataSource(DataSource):
                 continue
 
             source = self.sources[name]
-            entry = self.entries[name]
+            config = self.configs[name]
             prev_epoch = source.epoch_id
 
             adapter_samples = source.get_samples(count)
 
             if source.epoch_id > prev_epoch:
                 self.epoch_counts[name] = source.epoch_id
-                max_epochs = entry.config.max_epochs
+                max_epochs = config.max_epochs
                 if max_epochs is not None and source.epoch_id >= max_epochs:
                     logger.info(f"Adapter '{name}' reached max_epochs={max_epochs}, will deregister")
                     exhausted.append(name)

@@ -12,8 +12,15 @@ from pathlib import Path
 import yaml
 
 
-@dataclass
+@dataclass(frozen=True)
 class AdapterConfig:
+    """Per-adapter config + controller-assigned runtime state.
+
+    Yaml-derived fields (name, rank, alpha, data, etc.) come from ``parse_adapter_yaml``.
+    Runtime fields (slot, exhausted) are set by the ``MultiLoRAController`` post-parse
+    via ``dataclasses.replace``. Frozen so consumers can safely receive shared copies.
+    """
+
     name: str
     rank: int
     alpha: int
@@ -24,6 +31,8 @@ class AdapterConfig:
     rm_type: str | None = None
     custom_rm_path: str | None = None
     max_epochs: int | None = None
+    slot: int = -1
+    exhausted: bool = False
 
 
 def parse_adapter_yaml(path: Path) -> AdapterConfig:
