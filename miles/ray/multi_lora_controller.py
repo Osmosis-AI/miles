@@ -1,27 +1,67 @@
 """Multi-LoRA controller: singleton Ray actor managing adapter lifecycle.
 
-The controller is the single source of truth for which adapters are active.
-Training workers, the RolloutManager, and SGLang engines query it.
+The controller owns adapter lifecycle state — registration, slot allocation,
+exhaustion tracking. It does **not** know about Megatron, SGLang, datasets,
+or rewards. Consumers read the runtime state via a single ``snapshot()`` call
+that returns an ``AdapterSnapshot``.
 
-The driver creates it once via ``create_multi_lora_controller`` and any
-process can then look it up with ``get_multi_lora_controller`` (mirrors the
-named-actor pattern used by ``miles.utils.prometheus_utils``).
+The driver creates the controller once via ``create_multi_lora_controller``
+and any process can then look it up with ``get_multi_lora_controller`` (mirrors
+the named-actor pattern used by ``miles.utils.prometheus_utils``).
 
-Adapters are registered explicitly via register_run(path). When locked,
-register/deregister calls are buffered and applied on unlock, preventing
-race conditions during training steps.
+When locked (during a training step), register/deregister calls are buffered
+and applied on unlock, preventing race conditions.
 """
 
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping
 
 import ray
 
-from miles.utils.adapter_config import parse_adapter_yaml
+from miles.utils.adapter_config import AdapterConfig, parse_adapter_yaml
+from miles.utils.types import AdapterRef, RewardSpec
 
 logger = logging.getLogger(__name__)
 
 CONTROLLER_NAME = "miles_multi_lora_controller"
+
+
+@dataclass(frozen=True)
+class AdapterEntry:
+    """An adapter as the controller sees it: parsed config + runtime slot."""
+
+    config: AdapterConfig
+    slot: int
+
+
+@dataclass(frozen=True)
+class AdapterSnapshot:
+    """Frozen view of the controller's runtime state at a point in time.
+
+    Returned by ``MultiLoRAController.snapshot()``. Cheap to pickle (members
+    are themselves frozen dataclasses / dicts of frozen dataclasses).
+    """
+
+    entries: Mapping[str, AdapterEntry]
+    exhausted: frozenset[str]
+
+    def names(self) -> list[str]:
+        return list(self.entries)
+
+    def slot(self, name: str) -> int:
+        return self.entries[name].slot
+
+    def ref(self, name: str) -> AdapterRef:
+        """Build the per-sample handle for ``name`` (identity + slot)."""
+        return AdapterRef(name=name, slot=self.entries[name].slot)
+
+    def reward_spec(self, name: str) -> RewardSpec:
+        """Build the per-sample reward dispatch handle for ``name``."""
+        cfg = self.entries[name].config
+        return RewardSpec(rm_type=cfg.rm_type, custom_rm_path=cfg.custom_rm_path)
 
 
 def create_multi_lora_controller(max_adapters: int, max_rank: int):
@@ -39,12 +79,12 @@ class MultiLoRAController:
     def __init__(self, max_adapters: int, max_rank: int):
         self.max_adapters = max_adapters
         self.max_rank = max_rank
-        self.configs = {}
-        self.slot_map = {}
-        self.free_slots = set(range(max_adapters))
+        self.configs: dict[str, AdapterConfig] = {}
+        self.slot_map: dict[str, int] = {}
+        self.free_slots: set[int] = set(range(max_adapters))
+        self.exhausted: set[str] = set()
         self.locked = False
-        self.pending = []  # buffered (method_name, args) while locked
-        self.exhausted = set()  # adapters marked as done by data source
+        self.pending: list[tuple[str, tuple]] = []  # buffered (method, args) while locked
 
     def lock(self):
         """Lock the adapter set. Register/deregister calls are buffered until unlock."""
@@ -69,15 +109,11 @@ class MultiLoRAController:
             logger.info(f"Buffered register_run({adapter_dir}) — controller is locked")
             return {"buffered": True}
 
-        from pathlib import Path
-
-        yaml_path = Path(adapter_dir) / "adapter.yaml"
-        config = parse_adapter_yaml(yaml_path)
+        config = parse_adapter_yaml(Path(adapter_dir) / "adapter.yaml")
 
         assert config.rank <= self.max_rank, (
             f"Adapter '{config.name}' rank ({config.rank}) exceeds max rank ({self.max_rank})"
         )
-
         if config.name in self.configs:
             raise ValueError(f"Adapter '{config.name}' is already registered")
         if not self.free_slots:
@@ -92,7 +128,7 @@ class MultiLoRAController:
         return {"name": config.name, "slot": slot}
 
     def deregister_run(self, name: str) -> int:
-        """Deregister an adapter by name.
+        """Deregister an adapter by name. Also clears it from the exhausted set.
 
         If locked, the call is buffered and applied on unlock.
         """
@@ -107,39 +143,27 @@ class MultiLoRAController:
         slot = self.slot_map.pop(name)
         del self.configs[name]
         self.free_slots.add(slot)
+        self.exhausted.discard(name)
 
         logger.info(f"Deregistered adapter '{name}' from slot {slot}")
         return slot
 
-    def active_runs(self) -> dict[str, dict]:
-        """Return current adapter configs and slot assignments."""
-        return {
-            name: {
-                "slot": self.slot_map[name],
-                "rank": self.configs[name].rank,
-                "alpha": self.configs[name].alpha,
-                "data": self.configs[name].data,
-                "dir": str(self.configs[name].dir),
-                "input_key": self.configs[name].input_key,
-                "label_key": self.configs[name].label_key,
-                "rm_type": self.configs[name].rm_type,
-                "custom_rm_path": self.configs[name].custom_rm_path,
-                "max_epochs": self.configs[name].max_epochs,
-            }
-            for name in self.configs
-        }
-
     def mark_exhausted(self, name: str) -> None:
-        """Mark an adapter as exhausted (dataset finished). Called by data source."""
+        """Mark an adapter as exhausted (dataset finished). Called by the data source.
+
+        The adapter remains active until a consumer calls ``deregister_run``.
+        """
         if name in self.configs:
             self.exhausted.add(name)
             logger.info(f"Adapter '{name}' marked as exhausted")
 
-    def get_exhausted(self) -> list[str]:
-        """Return and clear the list of exhausted adapters. Called by actor after each step."""
-        names = list(self.exhausted)
-        self.exhausted.clear()
-        return names
+    def snapshot(self) -> AdapterSnapshot:
+        """Return a frozen view of the current adapter set and exhaustion state."""
+        entries = {
+            name: AdapterEntry(config=self.configs[name], slot=self.slot_map[name])
+            for name in self.configs
+        }
+        return AdapterSnapshot(entries=entries, exhausted=frozenset(self.exhausted))
 
 
 @asynccontextmanager

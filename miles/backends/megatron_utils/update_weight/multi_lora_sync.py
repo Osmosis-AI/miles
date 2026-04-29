@@ -1,21 +1,27 @@
-"""Multi-LoRA weight sync: export per-adapter weights and send to SGLang engines.
+"""Multi-LoRA helpers: rank slicing, per-adapter checkpoint save, adapter cleanup.
 
-Uses expose_adapter_slot to make the bridge see one adapter at a time,
-then reuses the existing single-LoRA weight sync machinery.
+The live per-step weight sync lives on ``UpdateWeightFromTensor`` itself
+(``_send_multi_lora_params``); this module only holds the helpers that don't
+naturally belong on that class.
+
+TODO(perf): re-sync only adapters that were trained this step. Right now
+``_send_multi_lora_params`` re-IPCs every registered adapter every call, even
+when an adapter saw no data and its weights are unchanged. The hint already
+exists in ``rollout_data["adapter_slots"]`` (set by the train actor); plumbing
+it through cleanly without putting per-step state on the long-lived updater is
+deferred — see chat 2026-04-28 for the design discussion.
 """
 
 import logging
+from typing import Mapping
 
 import ray
 import torch
 import torch.distributed as dist
 
-from miles.backends.megatron_utils.lora_utils import build_lora_sync_config, is_lora_weight_name
-from miles.utils.distributed_utils import get_gloo_group
+from miles.ray.multi_lora_controller import AdapterEntry, get_multi_lora_controller
 
 logger = logging.getLogger(__name__)
-
-_loaded_adapters: set[str] = set()
 
 
 def slice_lora_to_rank(hf_name: str, tensor: torch.Tensor, adapter_rank: int) -> torch.Tensor:
@@ -40,116 +46,27 @@ def slice_lora_to_rank(hf_name: str, tensor: torch.Tensor, adapter_rank: int) ->
     return tensor
 
 
-
-
-def sync_multi_lora_weights(
-    args,
-    model,
-    adapter_configs: dict[str, dict],
-    rollout_engines,
-    ipc_engine,
-    ipc_gather_src,
-    ipc_gather_group,
-    active_slots: set[int] | None = None,
-):
-    """Sync all adapter weights to SGLang engines.
-
-    For each adapter slot, temporarily exposes it as a single-LoRA adapter
-    and uses the existing single-LoRA weight sync path (HfWeightIteratorBridge
-    + _send_hf_params pattern) to export and send weights.
-    """
-    from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
-
-    from miles.utils.megatron_bridge_utils import patch_megatron_model
-    from .common import post_process_weights
-    from .update_weight_from_tensor import _send_to_colocated_engine
-    from .hf_weight_iterator_bridge import HfWeightIteratorBridge
-
-    rank = dist.get_rank()
-
-    # Pause generation
-    if rank == 0:
-        mode = args.pause_generation_mode
-        ray.get([engine.pause_generation.remote(mode=mode) for engine in rollout_engines])
-        ray.get([engine.flush_cache.remote() for engine in rollout_engines])
-    dist.barrier(group=get_gloo_group())
-
-    for adapter_name, cfg in adapter_configs.items():
-        idx = cfg["slot"]
-        adapter_rank = cfg.get("rank", args.lora_rank)
-
-        if active_slots is not None and idx not in active_slots:
-            logger.info(f"Skipping weight sync for adapter '{adapter_name}' (slot {idx}) — not trained this step")
-            continue
-
-        lora_config = build_lora_sync_config(args)
-        lora_config["r"] = adapter_rank
-        lora_config["lora_alpha"] = cfg.get("alpha", args.lora_alpha)
-
-        # Use the same HfWeightIteratorBridge as single LoRA, inside expose_adapter_slot
-        with expose_adapter_slot(model, idx):
-            iterator = HfWeightIteratorBridge(args=args, model=model, model_name=None, quantization_config=None, is_lora=True)
-            for hf_named_tensors in iterator.get_hf_weight_chunks({}):
-                weight_tensors = [
-                    (n, slice_lora_to_rank(n, t, adapter_rank))
-                    for n, t in hf_named_tensors if is_lora_weight_name(n)
-                ]
-                if not weight_tensors:
-                    continue
-
-                refs, long_lived = _send_to_colocated_engine(
-                    hf_named_tensors=weight_tensors,
-                    ipc_engine=ipc_engine,
-                    ipc_gather_src=ipc_gather_src,
-                    ipc_gather_group=ipc_gather_group,
-                    lora_config=lora_config,
-                    lora_name=adapter_name,
-                    lora_loaded=adapter_name in _loaded_adapters,
-                )
-                if refs:
-                    results = ray.get(refs)
-                del long_lived
-
-        _loaded_adapters.add(adapter_name)
-        logger.info(f"Synced adapter '{adapter_name}' weights to SGLang")
-
-    dist.barrier(group=get_gloo_group())
-
-    # Resume generation
-    if rank == 0:
-        post_process_weights(
-            rollout_engines=rollout_engines,
-            restore_weights_before_load=False,
-            post_process_quantization=True,
-        )
-        ray.get([engine.continue_generation.remote() for engine in rollout_engines])
-    dist.barrier(group=get_gloo_group())
-
-
 def save_multi_lora_checkpoints(
     args,
     model,
     iteration: int,
-    adapter_configs: dict[str, dict],
+    adapter_entries: Mapping[str, AdapterEntry],
 ):
     """Save per-adapter checkpoints to each adapter's directory."""
-    from pathlib import Path
-
-    from megatron.core import mpu
     from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
+    from megatron.core import mpu
 
     from .hf_weight_iterator_bridge import HfWeightIteratorBridge
 
     tp_rank = mpu.get_tensor_model_parallel_rank()
     pp_rank = mpu.get_pipeline_model_parallel_rank()
 
-    for adapter_name, cfg in adapter_configs.items():
-        idx = cfg["slot"]
-        ckpt_dir = Path(cfg["dir"]) / "checkpoints" / f"step_{iteration}"
+    for adapter_name, entry in adapter_entries.items():
+        ckpt_dir = entry.config.dir / "checkpoints" / f"step_{iteration}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
         adapter_state = {}
-        with expose_adapter_slot(model, idx):
+        with expose_adapter_slot(model, entry.slot):
             iterator = HfWeightIteratorBridge(args=args, model=model, model_name=None, quantization_config=None, is_lora=True)
             for hf_named_tensors in iterator.get_hf_weight_chunks({}):
                 for hf_name, weight in hf_named_tensors:
@@ -162,6 +79,7 @@ def save_multi_lora_checkpoints(
 
 def deregister_adapter(
     name: str,
+    entry: AdapterEntry,
     rollout_id: int,
     args,
     model,
@@ -169,26 +87,19 @@ def deregister_adapter(
     ipc_engine=None,
     ipc_gather_src=None,
 ):
-    """Full cleanup for an exhausted adapter: save, unload, reset, deregister."""
-    from megatron.bridge.peft.multi_lora_layers import unregister_adapter
+    """Full cleanup for an exhausted adapter: save, unload, reset, deregister.
 
-    from miles.ray.multi_lora_controller import get_multi_lora_controller
+    Caller must pass the ``AdapterEntry`` from the snapshot they're processing —
+    this function only writes to the controller (via ``deregister_run``) and
+    does not re-snapshot.
+    """
+    from megatron.bridge.peft.multi_lora_layers import unregister_adapter
 
     from ..multi_lora import zero_optimizer_state_for_adapter
 
-    controller = get_multi_lora_controller()
-    adapter_configs = ray.get(controller.active_runs.remote())
-    if name not in adapter_configs:
-        return
-
-    cfg = adapter_configs[name]
-    idx = cfg["slot"]
-
-    # 1. Save final checkpoint
-    save_multi_lora_checkpoints(args, model, rollout_id, {name: cfg})
+    save_multi_lora_checkpoints(args, model, rollout_id, {name: entry})
     logger.info(f"Saved final checkpoint for adapter '{name}'")
 
-    # 2. Unload from SGLang
     if ipc_engine is not None and dist.get_rank() == ipc_gather_src:
         try:
             ray.get(ipc_engine.unload_lora_adapter.remote(lora_name=name))
@@ -196,15 +107,11 @@ def deregister_adapter(
             pass
     logger.info(f"Unloaded adapter '{name}' from SGLang")
 
-    # 3. Reset layer weights
-    unregister_adapter(model, idx)
-    logger.info(f"Reset layer weights for adapter '{name}' (slot {idx})")
+    unregister_adapter(model, entry.slot)
+    logger.info(f"Reset layer weights for adapter '{name}' (slot {entry.slot})")
 
-    # 4. Zero optimizer state and sync reset weights to fp32 main params
-    zero_optimizer_state_for_adapter(optimizer, model, idx)
+    zero_optimizer_state_for_adapter(optimizer, model, entry.slot)
     optimizer.reload_model_params()
 
-    # 5. Deregister from controller (frees slot)
-    ray.get(controller.deregister_run.remote(name))
-    _loaded_adapters.discard(name)
+    ray.get(get_multi_lora_controller().deregister_run.remote(name))
     logger.info(f"Fully deregistered adapter '{name}'")

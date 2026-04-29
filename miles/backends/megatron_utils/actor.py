@@ -113,15 +113,13 @@ class MegatronTrainRayActor(TrainRayActor):
                 m.enable_check_replay_result = m.enabled and self.args.ci_test
 
         if is_multi_lora_enabled(args):
-            import ray
-
             from miles.ray.multi_lora_controller import get_multi_lora_controller
 
             from .multi_lora import initialize_multi_lora_model_and_optimizer
 
-            adapter_configs = ray.get(get_multi_lora_controller().active_runs.remote())
+            snapshot = ray.get(get_multi_lora_controller().snapshot.remote())
             (self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id) = (
-                initialize_multi_lora_model_and_optimizer(args, adapter_configs, role)
+                initialize_multi_lora_model_and_optimizer(args, snapshot.entries, role)
             )
         else:
             (self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id) = (
@@ -178,14 +176,15 @@ class MegatronTrainRayActor(TrainRayActor):
                 update_weight_cls = UpdateWeightFromDistributed
             else:
                 update_weight_cls = UpdateWeightP2P
-        self.weight_updater = update_weight_cls(
-            self.args,
-            self.model,
+        weight_updater_kwargs = dict(
             weights_getter=lambda: self.weights_backuper.get("actor"),
             model_name=type(self.hf_config).__name__.lower() if self.args.model_name is None else self.args.model_name,
             quantization_config=getattr(self.hf_config, "quantization_config", None),
             is_lora=is_lora_enabled(args),
         )
+        if update_weight_cls is UpdateWeightFromTensor:
+            weight_updater_kwargs["is_multi_lora"] = is_multi_lora_enabled(args)
+        self.weight_updater = update_weight_cls(self.args, self.model, **weight_updater_kwargs)
 
         # empty cache after initialization
         clear_memory()
@@ -380,10 +379,6 @@ class MegatronTrainRayActor(TrainRayActor):
         return getattr(self.args, f"use_rollout_{m.name}_replay")
 
     def train_actor(self, rollout_id: int, rollout_data: RolloutBatch) -> None:
-        # Track which adapter slots had data this step
-        adapter_slots = rollout_data.get("adapter_slots")
-        self.active_adapter_slots = set(adapter_slots) if adapter_slots is not None else None
-
         # Create data iterator for log_probs and train.
         data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
 
@@ -484,16 +479,17 @@ class MegatronTrainRayActor(TrainRayActor):
 
         log_perf_data(rollout_id, self.args)
 
-        # Multi-LoRA: handle exhausted adapters
+        # Multi-LoRA: clean up adapters the data source marked exhausted this step
         if is_multi_lora_enabled(self.args):
             from miles.ray.multi_lora_controller import get_multi_lora_controller
 
             from .update_weight.multi_lora_sync import deregister_adapter
 
-            exhausted = ray.get(get_multi_lora_controller().get_exhausted.remote())
-            for name in exhausted:
+            snapshot = ray.get(get_multi_lora_controller().snapshot.remote())
+            for name in snapshot.exhausted:
                 deregister_adapter(
                     name=name,
+                    entry=snapshot.entries[name],
                     rollout_id=rollout_id,
                     args=self.args,
                     model=self.model,
@@ -521,8 +517,8 @@ class MegatronTrainRayActor(TrainRayActor):
 
             from .update_weight.multi_lora_sync import save_multi_lora_checkpoints
 
-            adapter_configs = ray.get(get_multi_lora_controller().active_runs.remote())
-            save_multi_lora_checkpoints(self.args, self.model, rollout_id, adapter_configs)
+            snapshot = ray.get(get_multi_lora_controller().snapshot.remote())
+            save_multi_lora_checkpoints(self.args, self.model, rollout_id, snapshot.entries)
         else:
             save(rollout_id, self.model, self.optimizer, self.opt_param_scheduler)
 
@@ -567,16 +563,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
             print_memory("before update_weights")
-            if is_multi_lora_enabled(self.args):
-                from miles.ray.multi_lora_controller import get_multi_lora_controller
-
-                adapter_configs = ray.get(get_multi_lora_controller().active_runs.remote())
-                self.weight_updater.update_multi_lora_weights(
-                    adapter_configs=adapter_configs,
-                    active_slots=getattr(self, "active_adapter_slots", None),
-                )
-            else:
-                self.weight_updater.update_weights()
+            self.weight_updater.update_weights()
             print_memory("after update_weights")
 
             if self.args.ci_test and len(rollout_engines) > 0 and not is_lora_enabled(self.args):
