@@ -1,6 +1,7 @@
 import logging
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
 from typing import Any
 
 import ray
@@ -198,13 +199,22 @@ class UpdateWeightFromTensor:
 
         # For LoRA+distributed: base weights are frozen, skip after first round.
         if not (self.is_lora and self.use_distribute and self._lora_base_synced):
-            for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
-                megatron_local_weights, weight_type="base"
-            ):
-                refs, long_lived_tensors = self._send_base_params(hf_named_tensors)
-                results = ray.get(refs)
-                _check_weight_sync_results(results, is_lora=False)
-                del long_lived_tensors
+            # Multi-LoRA: hide adapters so the bridge's conversion-task walk doesn't
+            # crash on the unfamiliar `adapters[*]` ModuleList structure.
+            if self.is_multi_lora:
+                from megatron.bridge.peft.multi_lora_layers import hide_adapters
+
+                base_ctx = hide_adapters(self.model)
+            else:
+                base_ctx = nullcontext()
+            with base_ctx:
+                for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
+                    megatron_local_weights, weight_type="base"
+                ):
+                    refs, long_lived_tensors = self._send_base_params(hf_named_tensors)
+                    results = ray.get(refs)
+                    _check_weight_sync_results(results, is_lora=False)
+                    del long_lived_tensors
 
         if self.is_multi_lora:
             self._send_multi_lora_params()
