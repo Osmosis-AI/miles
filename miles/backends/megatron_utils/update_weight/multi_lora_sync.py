@@ -129,12 +129,21 @@ def save_multi_lora_checkpoints(
             # ---- (2) HF PEFT format (TP-gathered, single file) ----
             # Bridge export is collective: every TP rank participates in the
             # all-gather. Only the global writer materialises the file.
+            #
+            # ``.contiguous().clone()`` is needed because the bridge expands
+            # one Megatron fused-linear adapter into multiple HF keys that
+            # share storage — the single ``linear_qkv.adapter.linear_in``
+            # surfaces as ``{q,k,v}_proj.lora_A`` all aliasing the same
+            # tensor, and ``linear_fc1`` similarly produces aliased
+            # ``{gate,up}_proj.lora_A``. ``safetensors.save_file`` refuses
+            # aliased tensors, and HF PEFT consumers expect independent
+            # per-projection copies regardless.
             hf_state: dict[str, torch.Tensor] = {}
             with megatron_bridge_utils.patch_megatron_model(model):
                 for hf_name, weight, _megatron_name in bridge.export_adapter_weights(
                     model, cpu=True, show_progress=False,
                 ):
-                    hf_state[hf_name] = weight.contiguous()
+                    hf_state[hf_name] = weight.contiguous().clone()
 
         if is_global_writer:
             save_safetensors(
