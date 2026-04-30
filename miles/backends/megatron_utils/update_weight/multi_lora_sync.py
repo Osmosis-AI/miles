@@ -12,13 +12,16 @@ it through cleanly without putting per-step state on the long-lived updater is
 deferred — see chat 2026-04-28 for the design discussion.
 """
 
+import json
 import logging
-from typing import Mapping
+import os
+from collections.abc import Mapping
 
 import ray
 import torch
 import torch.distributed as dist
 
+from miles.backends.training_utils.parallel import get_parallel_state
 from miles.ray.multi_lora_controller import get_multi_lora_controller
 from miles.utils.adapter_config import AdapterConfig
 
@@ -53,29 +56,111 @@ def save_multi_lora_checkpoints(
     iteration: int,
     adapter_configs: Mapping[str, AdapterConfig],
 ):
-    """Save per-adapter checkpoints to each adapter's directory."""
+    """Save per-adapter checkpoints in two formats per adapter.
+
+    Layout (per adapter)::
+
+        {adapter.dir}/checkpoints/step_{iteration}/
+        ├── adapter_megatron_tp{tp}_pp{pp}.pt   ← per-rank shard, fast resume
+        ├── adapter_model.safetensors           ← gathered HF, inference / external
+        └── adapter_config.json                 ← HF PEFT metadata (r, alpha, ...)
+
+    The Megatron shard preserves the local TP/PP layout: each (tp, pp) tile
+    writes its own file with Megatron-native parameter names, copied straight
+    from the slot's ``ParallelLinearAdapter`` weights with no gather/scatter.
+    Only one DP replica per tile writes (the others would write identical
+    bytes). Resume is then a trivial ``param.data.copy_`` per tensor.
+
+    The HF safetensors is TP-gathered by the bridge (collective across all
+    ranks), then written by a single rank in standard PEFT layout so external
+    tools (HuggingFace ``peft``, SGLang, vLLM) can consume it directly.
+
+    Atomicity follows the single-LoRA pattern: ``dist.barrier()`` between
+    sections so partial writes from a faster rank don't race with the next
+    operation, plus ``os.sync()`` after the HF write to flush dirty pages
+    before the function returns.
+    """
+    from megatron.bridge import AutoBridge
     from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
     from megatron.core import mpu
+    from safetensors.torch import save_file as save_safetensors
 
-    from .hf_weight_iterator_bridge import HfWeightIteratorBridge
+    from miles.backends.megatron_utils.lora_utils import convert_target_modules_to_hf
+    from miles.utils import megatron_bridge_utils
 
     tp_rank = mpu.get_tensor_model_parallel_rank()
     pp_rank = mpu.get_pipeline_model_parallel_rank()
+    is_dp_rank_0 = get_parallel_state().intra_dp.rank == 0
+    is_global_writer = is_dp_rank_0 and tp_rank == 0 and pp_rank == 0
+
+    target_modules_hf = (
+        convert_target_modules_to_hf(list(args.target_modules))
+        if args.target_modules
+        else ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    )
+
+    # Build the bridge once and reuse across every adapter — saves N-1
+    # ``AutoBridge.from_hf_pretrained`` invocations for N adapters.
+    bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)
 
     for adapter_name, config in adapter_configs.items():
         ckpt_dir = config.dir / "checkpoints" / f"step_{iteration}"
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        if is_dp_rank_0:
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+        if dist.is_initialized():
+            dist.barrier()
 
-        adapter_state = {}
         with expose_adapter_slot(model, config.slot):
-            iterator = HfWeightIteratorBridge(args=args, model=model, model_name=None, quantization_config=None, is_lora=True)
-            for hf_named_tensors in iterator.get_hf_weight_chunks({}):
-                for hf_name, weight in hf_named_tensors:
-                    adapter_state[hf_name] = weight.cpu()
+            # ---- (1) Megatron-native per-rank shard (fast resume) ----
+            if is_dp_rank_0:
+                shard: dict[str, torch.Tensor] = {
+                    name: param.data.cpu()
+                    for chunk in model
+                    for name, param in chunk.named_parameters()
+                    if ".adapter." in name
+                }
+                native_path = ckpt_dir / f"adapter_megatron_tp{tp_rank}_pp{pp_rank}.pt"
+                torch.save(shard, native_path)
+                logger.info(
+                    f"Saved adapter '{adapter_name}' Megatron shard "
+                    f"({len(shard)} tensors) to {native_path}"
+                )
 
-        native_path = ckpt_dir / f"adapter_megatron_tp{tp_rank}_pp{pp_rank}.pt"
-        torch.save(adapter_state, native_path)
-        logger.info(f"Saved adapter '{adapter_name}' checkpoint ({len(adapter_state)} tensors) to {native_path}")
+            # ---- (2) HF PEFT format (TP-gathered, single file) ----
+            # Bridge export is collective: every TP rank participates in the
+            # all-gather. Only the global writer materialises the file.
+            hf_state: dict[str, torch.Tensor] = {}
+            with megatron_bridge_utils.patch_megatron_model(model):
+                for hf_name, weight, _megatron_name in bridge.export_adapter_weights(
+                    model, cpu=True, show_progress=False,
+                ):
+                    hf_state[hf_name] = weight.contiguous()
+
+        if is_global_writer:
+            save_safetensors(
+                hf_state,
+                str(ckpt_dir / "adapter_model.safetensors"),
+                metadata={"format": "pt"},
+            )
+            adapter_config_json = {
+                "peft_type": "LORA",
+                "r": config.rank,
+                "lora_alpha": config.alpha,
+                "target_modules": target_modules_hf,
+                "lora_dropout": getattr(args, "lora_dropout", 0.0),
+                "bias": "none",
+                "task_type": "CAUSAL_LM",
+            }
+            with open(ckpt_dir / "adapter_config.json", "w") as f:
+                json.dump(adapter_config_json, f, indent=2)
+            os.sync()
+            logger.info(
+                f"Saved adapter '{adapter_name}' HF PEFT to {ckpt_dir} "
+                f"({len(hf_state)} tensors)"
+            )
+
+        if dist.is_initialized():
+            dist.barrier()
 
 
 def deregister_adapter(

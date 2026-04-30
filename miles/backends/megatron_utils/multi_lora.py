@@ -168,9 +168,16 @@ def initialize_multi_lora_model_and_optimizer(
         register_adapter(model, config.slot, rank=config.rank, alpha=config.alpha)
         ckpt = find_latest_checkpoint(config.dir / "checkpoints")
         if ckpt:
-            logger.info(f"Loading adapter '{name}' from {ckpt}")
             state_dict = torch.load(ckpt, map_location="cpu", weights_only=True)
-            load_adapter(model, config.slot, state_dict)
+            loaded = load_adapter(model, config.slot, state_dict)
+            # Catch silent name-mismatch failures: a populated state_dict that
+            # writes nothing into the model means the saved schema drifted
+            # from what ``expose_adapter_slot`` + ``named_parameters`` yields.
+            assert loaded > 0, (
+                f"Loaded 0 tensors from adapter checkpoint {ckpt} "
+                f"(state_dict has {len(state_dict)} entries) — name mismatch?"
+            )
+            logger.info(f"Loaded adapter '{name}' from {ckpt} ({loaded} tensors)")
 
     # Sync bf16 model params → fp32 optimizer main params so the rank
     # masking applied by register_adapter is reflected in the fp32 copies.
