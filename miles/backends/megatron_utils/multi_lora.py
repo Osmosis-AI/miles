@@ -166,18 +166,27 @@ def initialize_multi_lora_model_and_optimizer(
 
     for name, config in adapter_configs.items():
         register_adapter(model, config.slot, rank=config.rank, alpha=config.alpha)
-        ckpt = find_latest_checkpoint(config.dir / "checkpoints")
-        if ckpt:
-            state_dict = torch.load(ckpt, map_location="cpu", weights_only=True)
-            loaded = load_adapter(model, config.slot, state_dict)
-            # Catch silent name-mismatch failures: a populated state_dict that
-            # writes nothing into the model means the saved schema drifted
-            # from what ``expose_adapter_slot`` + ``named_parameters`` yields.
-            assert loaded > 0, (
-                f"Loaded 0 tensors from adapter checkpoint {ckpt} "
-                f"(state_dict has {len(state_dict)} entries) — name mismatch?"
+        ckpt_root = config.dir / "checkpoints"
+        ckpt = find_latest_checkpoint(ckpt_root)
+        # Per-adapter prefix so Ray's log dedupe (which collapses identical
+        # repeated messages) keeps these distinct across adapters.
+        log_prefix = f"[multilora] ({name})"
+        if ckpt is None:
+            logger.info(
+                f"{log_prefix} no checkpoint found under {ckpt_root}, "
+                f"starting from random init"
             )
-            logger.info(f"Loaded adapter '{name}' from {ckpt} ({loaded} tensors)")
+            continue
+        state_dict = torch.load(ckpt, map_location="cpu", weights_only=True)
+        loaded = load_adapter(model, config.slot, state_dict)
+        # Catch silent name-mismatch failures: a populated state_dict that
+        # writes nothing into the model means the saved schema drifted
+        # from what ``expose_adapter_slot`` + ``named_parameters`` yields.
+        assert loaded > 0, (
+            f"{log_prefix} loaded 0 tensors from {ckpt} "
+            f"(state_dict has {len(state_dict)} entries) — name mismatch?"
+        )
+        logger.info(f"{log_prefix} loaded from {ckpt} ({loaded} tensors)")
 
     # Sync bf16 model params → fp32 optimizer main params so the rank
     # masking applied by register_adapter is reflected in the fp32 copies.
@@ -187,26 +196,43 @@ def initialize_multi_lora_model_and_optimizer(
 
 
 def find_latest_checkpoint(ckpt_dir: Path) -> Path | None:
-    """Find the latest step checkpoint in an adapter's checkpoint directory."""
+    """Find the latest *cross-rank-complete* step checkpoint.
+
+    Walks ``step_*`` directories from highest-numbered to lowest and returns
+    the first one that contains the per-rank shard for *every* (tp, pp) tile,
+    not just this rank's. This guarantees all ranks pick the same step on
+    load — without it, asymmetric partial saves (rank 0 wrote, rank 1 didn't)
+    would have ranks loading different versions of the same slot, silently
+    corrupting the model. Each rank then returns its own ``tp{tp}_pp{pp}.pt``
+    path from the chosen step.
+
+    Atomic saves (``_tmp_step_N`` → ``step_N`` rename) make every fresh
+    checkpoint complete by construction; this guard exists for legacy
+    partial saves left on disk by the pre-atomic-save code.
+    """
     if not ckpt_dir.exists():
         return None
 
     from megatron.core import mpu
 
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    pp_size = mpu.get_pipeline_model_parallel_world_size()
     tp_rank = mpu.get_tensor_model_parallel_rank()
     pp_rank = mpu.get_pipeline_model_parallel_rank()
 
     step_dirs = sorted(
         [d for d in ckpt_dir.iterdir() if d.is_dir() and d.name.startswith("step_")],
         key=lambda d: int(d.name.split("_")[1]),
+        reverse=True,
     )
-    if not step_dirs:
-        return None
-
-    latest = step_dirs[-1]
-    native_path = latest / f"adapter_megatron_tp{tp_rank}_pp{pp_rank}.pt"
-    if native_path.exists():
-        return native_path
+    for step_dir in step_dirs:
+        all_present = all(
+            (step_dir / f"adapter_megatron_tp{tp}_pp{pp}.pt").exists()
+            for tp in range(tp_size)
+            for pp in range(pp_size)
+        )
+        if all_present:
+            return step_dir / f"adapter_megatron_tp{tp_rank}_pp{pp_rank}.pt"
     return None
 
 
