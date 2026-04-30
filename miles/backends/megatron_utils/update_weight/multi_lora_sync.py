@@ -104,9 +104,15 @@ def save_multi_lora_checkpoints(
     bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)
 
     for adapter_name, config in adapter_configs.items():
-        ckpt_dir = config.dir / "checkpoints" / f"step_{iteration}"
+        # Atomic save: write everything to a temp dir, then on success rename
+        # to the final step_N path. The temp name does not start with ``step_``,
+        # so ``find_latest_checkpoint`` ignores it even mid-write — a crash
+        # leaves an orphan ``_tmp_step_N`` rather than a half-populated
+        # ``step_N`` masquerading as the latest valid checkpoint.
+        final_dir = config.dir / "checkpoints" / f"step_{iteration}"
+        tmp_dir = config.dir / "checkpoints" / f"_tmp_step_{iteration}"
         if is_dp_rank_0:
-            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            tmp_dir.mkdir(parents=True, exist_ok=True)
         if dist.is_initialized():
             dist.barrier()
 
@@ -119,7 +125,7 @@ def save_multi_lora_checkpoints(
                     for name, param in chunk.named_parameters()
                     if ".adapter." in name
                 }
-                native_path = ckpt_dir / f"adapter_megatron_tp{tp_rank}_pp{pp_rank}.pt"
+                native_path = tmp_dir / f"adapter_megatron_tp{tp_rank}_pp{pp_rank}.pt"
                 torch.save(shard, native_path)
                 logger.info(
                     f"Saved adapter '{adapter_name}' Megatron shard "
@@ -148,7 +154,7 @@ def save_multi_lora_checkpoints(
         if is_global_writer:
             save_safetensors(
                 hf_state,
-                str(ckpt_dir / "adapter_model.safetensors"),
+                str(tmp_dir / "adapter_model.safetensors"),
                 metadata={"format": "pt"},
             )
             adapter_config_json = {
@@ -160,14 +166,27 @@ def save_multi_lora_checkpoints(
                 "bias": "none",
                 "task_type": "CAUSAL_LM",
             }
-            with open(ckpt_dir / "adapter_config.json", "w") as f:
+            with open(tmp_dir / "adapter_config.json", "w") as f:
                 json.dump(adapter_config_json, f, indent=2)
             os.sync()
             logger.info(
-                f"Saved adapter '{adapter_name}' HF PEFT to {ckpt_dir} "
+                f"Saved adapter '{adapter_name}' HF PEFT to {tmp_dir} "
                 f"({len(hf_state)} tensors)"
             )
 
+        # Wait for every rank to finish writing its part, then a single rank
+        # promotes the temp dir to its final name. ``os.replace`` is atomic on
+        # the same filesystem, but Linux ``rename(2)`` refuses to overwrite a
+        # non-empty target dir, so we ``rmtree`` any pre-existing ``step_N``
+        # first (only happens on re-saves at the same iteration).
+        if dist.is_initialized():
+            dist.barrier()
+        if is_global_writer:
+            if final_dir.exists():
+                import shutil
+                shutil.rmtree(final_dir)
+            os.replace(tmp_dir, final_dir)
+            logger.info(f"Promoted adapter '{adapter_name}' checkpoint to {final_dir}")
         if dist.is_initialized():
             dist.barrier()
 
