@@ -104,6 +104,10 @@ def save_multi_lora_checkpoints(
     bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)
 
     for adapter_name, config in adapter_configs.items():
+        # Per-adapter prefix so Ray's log dedupe (which collapses identical
+        # repeated messages) keeps these distinct across adapters.
+        log_prefix = f"[multilora] ({adapter_name})"
+
         # Atomic save: write everything to a temp dir, then on success rename
         # to the final step_N path. The temp name does not start with ``step_``,
         # so ``find_latest_checkpoint`` ignores it even mid-write — a crash
@@ -128,7 +132,7 @@ def save_multi_lora_checkpoints(
                 native_path = tmp_dir / f"adapter_megatron_tp{tp_rank}_pp{pp_rank}.pt"
                 torch.save(shard, native_path)
                 logger.info(
-                    f"Saved adapter '{adapter_name}' Megatron shard "
+                    f"{log_prefix} saved Megatron shard "
                     f"({len(shard)} tensors) to {native_path}"
                 )
 
@@ -170,7 +174,7 @@ def save_multi_lora_checkpoints(
                 json.dump(adapter_config_json, f, indent=2)
             os.sync()
             logger.info(
-                f"Saved adapter '{adapter_name}' HF PEFT to {tmp_dir} "
+                f"{log_prefix} saved HF PEFT to {tmp_dir} "
                 f"({len(hf_state)} tensors)"
             )
 
@@ -186,7 +190,7 @@ def save_multi_lora_checkpoints(
                 import shutil
                 shutil.rmtree(final_dir)
             os.replace(tmp_dir, final_dir)
-            logger.info(f"Promoted adapter '{adapter_name}' checkpoint to {final_dir}")
+            logger.info(f"{log_prefix} promoted checkpoint to {final_dir}")
         if dist.is_initialized():
             dist.barrier()
 
@@ -211,21 +215,23 @@ def deregister_adapter(
 
     from ..multi_lora import zero_optimizer_state_for_adapter
 
+    log_prefix = f"[multilora] ({name})"
+
     save_multi_lora_checkpoints(args, model, rollout_id, {name: config})
-    logger.info(f"Saved final checkpoint for adapter '{name}'")
+    logger.info(f"{log_prefix} saved final checkpoint")
 
     if ipc_engine is not None and dist.get_rank() == ipc_gather_src:
         try:
             ray.get(ipc_engine.unload_lora_adapter.remote(lora_name=name))
         except Exception:
             pass
-    logger.info(f"Unloaded adapter '{name}' from SGLang")
+    logger.info(f"{log_prefix} unloaded from SGLang")
 
     unregister_adapter(model, config.slot)
-    logger.info(f"Reset layer weights for adapter '{name}' (slot {config.slot})")
+    logger.info(f"{log_prefix} reset layer weights (slot {config.slot})")
 
     zero_optimizer_state_for_adapter(optimizer, model, config.slot)
     optimizer.reload_model_params()
 
     ray.get(get_multi_lora_controller().deregister_run.remote(name))
-    logger.info(f"Fully deregistered adapter '{name}'")
+    logger.info(f"{log_prefix} fully deregistered")
