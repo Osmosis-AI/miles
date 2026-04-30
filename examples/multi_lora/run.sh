@@ -35,12 +35,15 @@ ray job submit --address="http://127.0.0.1:8265" \
    \
    --hf-checkpoint /root/Qwen3-4B/ \
    --megatron-to-hf-mode bridge \
+   \
    --lora-rank 32 \
    --lora-alpha 32 \
    --lora-dropout 0.0 \
    --target-modules "all-linear" \
    --multi-lora-dir "${SCRIPT_DIR}/adapters" \
    --multi-lora-n-adapters 4 \
+   --sglang-lora-backend triton \
+   \
    --prompt-data /root/gsm8k/train.parquet \
    --input-key messages \
    --label-key label \
@@ -67,7 +70,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    --adam-beta1 0.9 \
    --adam-beta2 0.98 \
    \
-   --tensor-model-parallel-size 1 \
+   --tensor-model-parallel-size 2 \
    --sequence-parallel \
    --pipeline-model-parallel-size 1 \
    --context-parallel-size 1 \
