@@ -61,14 +61,14 @@ class MultiLoRAController:
         self.pending.clear()
         return results
 
-    def register_run(self, adapter_dir: str) -> dict:
+    def register_adapter(self, adapter_dir: str) -> dict:
         """Register an adapter from its directory path.
 
         If locked, the call is buffered and applied on unlock.
         """
         if self.locked:
-            self.pending.append(("register_run", (adapter_dir,)))
-            logger.info(f"Buffered register_run({adapter_dir}) — controller is locked")
+            self.pending.append(("register_adapter", (adapter_dir,)))
+            logger.info(f"Buffered register_adapter({adapter_dir}) — controller is locked")
             return {"buffered": True}
 
         config = parse_adapter_yaml(Path(adapter_dir) / "adapter.yaml")
@@ -88,14 +88,14 @@ class MultiLoRAController:
         logger.info(f"Registered adapter '{config.name}' at slot {slot}")
         return {"name": config.name, "slot": slot}
 
-    def deregister_run(self, name: str) -> int:
+    def deregister_adapter(self, name: str) -> int:
         """Deregister an adapter by name. Frees its slot for reuse.
 
         If locked, the call is buffered and applied on unlock.
         """
         if self.locked:
-            self.pending.append(("deregister_run", (name,)))
-            logger.info(f"Buffered deregister_run({name}) — controller is locked")
+            self.pending.append(("deregister_adapter", (name,)))
+            logger.info(f"Buffered deregister_adapter({name}) — controller is locked")
             return -1
 
         if name not in self._adapter_configs:
@@ -111,7 +111,7 @@ class MultiLoRAController:
     def mark_exhausted(self, name: str) -> None:
         """Mark an adapter as exhausted (dataset finished). Called by the data source.
 
-        The adapter remains active until a consumer calls ``deregister_run``.
+        The adapter remains active until a consumer calls ``deregister_adapter``.
         """
         if name in self._adapter_configs:
             self._adapter_configs[name] = dataclasses.replace(self._adapter_configs[name], exhausted=True)

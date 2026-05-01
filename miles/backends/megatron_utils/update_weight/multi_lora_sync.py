@@ -205,13 +205,14 @@ def deregister_adapter(
     ipc_engine=None,
     ipc_gather_src=None,
 ):
-    """Full cleanup for an exhausted adapter: save, unload, reset, deregister.
+    """Cross-system cleanup for a fully-drained adapter.
 
-    Caller passes the ``AdapterConfig`` they're already iterating over — this
-    function only writes to the controller (via ``deregister_run``) and does
-    not re-fetch the adapter set.
+    Composes save + sglang unload + model-layer ``clear_adapter_slot`` + opt
+    state zero + controller-side ``deregister_adapter``. Caller passes the
+    ``AdapterConfig`` they're already iterating over — this function does not
+    re-fetch the adapter set.
     """
-    from megatron.bridge.peft.multi_lora_layers import unregister_adapter
+    from megatron.bridge.peft.multi_lora_layers import clear_adapter_slot
 
     from ..multi_lora import zero_optimizer_state_for_adapter
 
@@ -227,11 +228,11 @@ def deregister_adapter(
             pass
     logger.info(f"{log_prefix} unloaded from SGLang")
 
-    unregister_adapter(model, config.slot)
-    logger.info(f"{log_prefix} reset layer weights (slot {config.slot})")
+    clear_adapter_slot(model, config.slot)
+    logger.info(f"{log_prefix} cleared adapter slot {config.slot}")
 
     zero_optimizer_state_for_adapter(optimizer, model, config.slot)
     optimizer.reload_model_params()
 
-    ray.get(get_multi_lora_controller().deregister_run.remote(name))
-    logger.info(f"{log_prefix} fully deregistered")
+    ray.get(get_multi_lora_controller().deregister_adapter.remote(name))
+    logger.info(f"{log_prefix} fully removed")

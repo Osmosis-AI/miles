@@ -162,10 +162,10 @@ def initialize_multi_lora_model_and_optimizer(
     opt_param_scheduler.step(increment=iteration * args.global_batch_size)
 
     # Register adapters and load per-adapter checkpoints
-    from megatron.bridge.peft.multi_lora_layers import load_adapter, register_adapter
+    from megatron.bridge.peft.multi_lora_layers import init_adapter_slot, load_adapter
 
     for name, config in adapter_configs.items():
-        register_adapter(model, config.slot, rank=config.rank, alpha=config.alpha)
+        init_adapter_slot(model, config.slot, rank=config.rank, alpha=config.alpha)
         ckpt_root = config.dir / "checkpoints"
         ckpt = find_latest_checkpoint(ckpt_root)
         # Per-adapter prefix so Ray's log dedupe (which collapses identical
@@ -189,7 +189,7 @@ def initialize_multi_lora_model_and_optimizer(
         logger.info(f"{log_prefix} loaded from {ckpt} ({loaded} tensors)")
 
     # Sync bf16 model params → fp32 optimizer main params so the rank
-    # masking applied by register_adapter is reflected in the fp32 copies.
+    # masking applied by init_adapter_slot is reflected in the fp32 copies.
     optimizer.reload_model_params()
 
     return model, optimizer, opt_param_scheduler, iteration

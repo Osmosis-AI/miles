@@ -40,7 +40,7 @@ async def train(args):
     controller = create_multi_lora_controller(args.multi_lora_n_adapters, args.lora_rank)
     for adapter_dir in sorted(Path(args.multi_lora_dir).iterdir()):
         if (adapter_dir / "adapter.yaml").exists():
-            ray.get(controller.register_run.remote(str(adapter_dir)))
+            ray.get(controller.register_adapter.remote(str(adapter_dir)))
 
     args.data_source_path = "miles.rollout.multi_lora_data_source.MultiLoRADataSource"
 
