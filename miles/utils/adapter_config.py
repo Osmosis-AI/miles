@@ -1,25 +1,30 @@
-"""Adapter config parsing for multi-LoRA training.
+"""Adapter config parsing and lifecycle state for multi-LoRA training.
 
-Each adapter directory contains an adapter.yaml with per-adapter
-identity (name, rank, alpha), data path, and dataset-specific keys.
-Training-level config (base model, target modules, max rank, LR)
-comes from CLI flags.
+Each adapter directory contains an adapter.yaml. Lifecycle state is owned
+by ``MultiLoRAController`` and snapshotted onto each ``AdapterConfig``.
 """
 
+import enum
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
 
+class AdapterState(enum.IntEnum):
+    """PENDING → ACTIVE → DRAINING → DRAINED → REMOVED."""
+
+    PENDING = 0   # registered, awaiting install (PR3)
+    ACTIVE = 1    # installed, emitting samples
+    DRAINING = 2  # deregister requested; data source skips emission
+    DRAINED = 3   # all in-flight work trained; ready for cleanup
+    REMOVED = 4   # cleanup done, slot freed
+
+
 @dataclass(frozen=True)
 class AdapterConfig:
-    """Per-adapter config + controller-assigned runtime state.
-
-    Yaml-derived fields (name, rank, alpha, data, etc.) come from ``parse_adapter_yaml``.
-    Runtime fields (slot, exhausted) are set by the ``MultiLoRAController`` post-parse
-    via ``dataclasses.replace``. Frozen so consumers can safely receive shared copies.
-    """
+    """Yaml-derived fields plus controller-assigned ``slot`` and ``state``.
+    Frozen so consumers can receive shared copies safely."""
 
     name: str
     rank: int
@@ -32,7 +37,7 @@ class AdapterConfig:
     custom_rm_path: str | None = None
     max_epochs: int | None = None
     slot: int = -1
-    exhausted: bool = False
+    state: AdapterState = AdapterState.PENDING
 
 
 def parse_adapter_yaml(path: Path) -> AdapterConfig:

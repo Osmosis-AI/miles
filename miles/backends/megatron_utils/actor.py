@@ -479,15 +479,18 @@ class MegatronTrainRayActor(TrainRayActor):
 
         log_perf_data(rollout_id, self.args)
 
-        # Multi-LoRA: clean up adapters the data source marked exhausted this step
         if is_multi_lora_enabled(self.args):
             from miles.ray.multi_lora_controller import get_multi_lora_controller
+            from miles.utils.adapter_config import AdapterState
 
             from .update_weight.multi_lora_sync import deregister_adapter
 
-            adapter_configs = ray.get(get_multi_lora_controller().adapter_configs.remote())
+            controller = get_multi_lora_controller()
+            ray.get(controller.report_train_completed.remote(rollout_id))
+
+            adapter_configs = ray.get(controller.adapter_configs.remote())
             for name, config in adapter_configs.items():
-                if not config.exhausted:
+                if config.state != AdapterState.DRAINED:
                     continue
                 deregister_adapter(
                     name=name,

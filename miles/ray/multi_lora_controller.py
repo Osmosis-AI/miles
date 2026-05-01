@@ -1,27 +1,17 @@
-"""Multi-LoRA controller: singleton Ray actor managing adapter lifecycle.
+"""Multi-LoRA controller: singleton Ray actor owning the adapter registry
+and lifecycle state machine. Knows nothing about Megatron / SGLang / datasets.
 
-The controller owns adapter lifecycle state — registration, slot allocation,
-exhaustion tracking. It does **not** know about Megatron, SGLang, datasets,
-or rewards. Consumers read the runtime state via a single ``adapter_configs()``
-call that returns ``dict[str, AdapterConfig]`` (each ``AdapterConfig`` carries
-its assigned ``slot`` and ``exhausted`` flag).
-
-The driver creates the controller once via ``create_multi_lora_controller``
-and any process can then look it up with ``get_multi_lora_controller`` (mirrors
-the named-actor pattern used by ``miles.utils.prometheus_utils``).
-
-When locked (during a training step), register/deregister calls are buffered
-and applied on unlock, preventing race conditions.
+State transitions are driven by the trainer via ``apply_pending_lifecycle``
+(at the top of each rollout cycle) and the ``report_*`` methods.
 """
 
 import dataclasses
 import logging
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import ray
 
-from miles.utils.adapter_config import AdapterConfig, parse_adapter_yaml
+from miles.utils.adapter_config import AdapterConfig, AdapterState, parse_adapter_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -45,92 +35,86 @@ class MultiLoRAController:
         self.max_rank = max_rank
         self._adapter_configs: dict[str, AdapterConfig] = {}
         self.free_slots: set[int] = set(range(max_adapters))
-        self.locked = False
-        self.pending: list[tuple[str, tuple]] = []  # buffered (method, args) while locked
-
-    def lock(self):
-        """Lock the adapter set. Register/deregister calls are buffered until unlock."""
-        self.locked = True
-
-    def unlock(self):
-        """Unlock and apply all buffered register/deregister calls."""
-        self.locked = False
-        results = []
-        for method_name, args in self.pending:
-            results.append(getattr(self, method_name)(*args))
-        self.pending.clear()
-        return results
+        self._max_initiated: int = -1
+        self._max_trained: int = -1
+        self._drain_target: dict[str, int] = {}
+        self._pending: list[tuple[str, str]] = []  # (action, name)
 
     def register_adapter(self, adapter_dir: str) -> dict:
-        """Register an adapter from its directory path.
-
-        If locked, the call is buffered and applied on unlock.
-        """
-        if self.locked:
-            self.pending.append(("register_adapter", (adapter_dir,)))
-            logger.info(f"Buffered register_adapter({adapter_dir}) — controller is locked")
-            return {"buffered": True}
-
+        """Assign a slot and mark ACTIVE. Fails fast if no slots are free."""
         config = parse_adapter_yaml(Path(adapter_dir) / "adapter.yaml")
-
         assert config.rank <= self.max_rank, (
             f"Adapter '{config.name}' rank ({config.rank}) exceeds max rank ({self.max_rank})"
         )
         if config.name in self._adapter_configs:
             raise ValueError(f"Adapter '{config.name}' is already registered")
         if not self.free_slots:
-            raise ValueError(f"No free adapter slots (max {self.max_adapters})")
+            raise RuntimeError(f"No free adapter slots (max {self.max_adapters})")
 
         slot = min(self.free_slots)
         self.free_slots.remove(slot)
-        self._adapter_configs[config.name] = dataclasses.replace(config, slot=slot)
+        self._adapter_configs[config.name] = dataclasses.replace(
+            config, slot=slot, state=AdapterState.ACTIVE
+        )
 
-        logger.info(f"Registered adapter '{config.name}' at slot {slot}")
+        logger.info(f"Registered adapter '{config.name}' at slot {slot} (ACTIVE)")
         return {"name": config.name, "slot": slot}
 
-    def deregister_adapter(self, name: str) -> int:
-        """Deregister an adapter by name. Frees its slot for reuse.
-
-        If locked, the call is buffered and applied on unlock.
-        """
-        if self.locked:
-            self.pending.append(("deregister_adapter", (name,)))
-            logger.info(f"Buffered deregister_adapter({name}) — controller is locked")
-            return -1
-
+    def deregister_adapter(self, name: str) -> None:
+        """Buffer a drain request; applied at the next lifecycle gate."""
         if name not in self._adapter_configs:
             raise KeyError(f"Adapter '{name}' is not registered")
+        cur_state = self._adapter_configs[name].state
+        if cur_state != AdapterState.ACTIVE:
+            logger.info(f"Adapter '{name}' already in {cur_state.name}; ignoring deregister")
+            return
+        self._pending.append(("deregister", name))
+        logger.info(f"Buffered deregister for adapter '{name}'")
 
+    def apply_pending_lifecycle(self, rollout_id: int) -> None:
+        """Drain buffered requests. Must run *before* ``report_generate_started``
+        so ``drain_target`` snaps to the last cycle that included the adapter."""
+        for action, name in self._pending:
+            if action == "deregister":
+                if name not in self._adapter_configs:
+                    continue
+                cur = self._adapter_configs[name]
+                if cur.state != AdapterState.ACTIVE:
+                    continue
+                self._adapter_configs[name] = dataclasses.replace(cur, state=AdapterState.DRAINING)
+                self._drain_target[name] = self._max_initiated
+                logger.info(f"Adapter '{name}' DRAINING (drain_target={self._max_initiated})")
+        self._pending.clear()
+
+    def report_generate_started(self, rollout_id: int) -> None:
+        if rollout_id > self._max_initiated:
+            self._max_initiated = rollout_id
+
+    def report_train_completed(self, rollout_id: int) -> None:
+        """Bump max_trained; promote DRAINING adapters whose target is met."""
+        if rollout_id > self._max_trained:
+            self._max_trained = rollout_id
+        for name, target in list(self._drain_target.items()):
+            if name not in self._adapter_configs:
+                continue
+            cur = self._adapter_configs[name]
+            if cur.state != AdapterState.DRAINING:
+                continue
+            if self._max_trained >= target:
+                self._adapter_configs[name] = dataclasses.replace(cur, state=AdapterState.DRAINED)
+                logger.info(f"Adapter '{name}' DRAINED")
+
+    def mark_removed(self, name: str) -> int:
+        """Finalize removal: drop from registry and free the slot. Called by
+        the orchestration layer once cross-system cleanup is done."""
+        if name not in self._adapter_configs:
+            raise KeyError(f"Adapter '{name}' is not registered")
         slot = self._adapter_configs[name].slot
         del self._adapter_configs[name]
+        self._drain_target.pop(name, None)
         self.free_slots.add(slot)
-
-        logger.info(f"Deregistered adapter '{name}' from slot {slot}")
+        logger.info(f"Removed adapter '{name}' (slot {slot} freed)")
         return slot
 
-    def mark_exhausted(self, name: str) -> None:
-        """Mark an adapter as exhausted (dataset finished). Called by the data source.
-
-        The adapter remains active until a consumer calls ``deregister_adapter``.
-        """
-        if name in self._adapter_configs:
-            self._adapter_configs[name] = dataclasses.replace(self._adapter_configs[name], exhausted=True)
-            logger.info(f"Adapter '{name}' marked as exhausted")
-
     def adapter_configs(self) -> dict[str, AdapterConfig]:
-        """Return a shallow copy of the current name → AdapterConfig mapping.
-
-        Each ``AdapterConfig`` is frozen and carries its slot and exhausted flag.
-        Consumers receive a fresh copy via Ray pickling, so mutations are safe.
-        """
         return dict(self._adapter_configs)
-
-
-@asynccontextmanager
-async def controller_step_lock(controller):
-    """Async context manager that locks the controller for the duration of a training step."""
-    ray.get(controller.lock.remote())
-    try:
-        yield
-    finally:
-        ray.get(controller.unlock.remote())

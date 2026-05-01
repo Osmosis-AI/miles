@@ -56,6 +56,9 @@ async def train(args):
         await rollout_manager.onload_kv.remote()
 
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
+        await controller.apply_pending_lifecycle.remote(rollout_id)
+        await controller.report_generate_started.remote(rollout_id)
+
         if args.eval_interval is not None and rollout_id == 0 and not args.skip_eval_before_train:
             await rollout_manager.eval.remote(rollout_id)
 
