@@ -35,9 +35,13 @@ logger = logging.getLogger(__name__)
 
 
 def slice_lora_to_rank(hf_name: str, tensor: torch.Tensor, adapter_rank: int) -> torch.Tensor:
-    """Slice a LoRA weight tensor from max_rank to adapter_rank for export.
+    """Slice a LoRA weight tensor from max_rank down to ``adapter_rank`` for export.
 
-    TODO: remove the zero-padding assertions once mixed-rank sync is validated.
+    The padded rows (lora_A) / cols (lora_B) must be exactly zero — that's the
+    rank-mask invariant that ``init_adapter_slot`` sets up and the autograd
+    chain (zero grad through both sides) preserves. The asserts here catch
+    invariant violations early; tracking down ``max=0.114`` (xavier ~4σ) in
+    SGLang weeks later is much worse.
     """
     if "lora_A" in hf_name and adapter_rank < tensor.shape[0]:
         remainder = tensor[adapter_rank:]
@@ -206,9 +210,9 @@ def _register_adapter(name: str, config: AdapterConfig, model) -> None:
 
     Loads the latest cross-rank-complete checkpoint into the slot (or leaves
     construction-time values if none), then runs ``init_adapter_slot`` to
-    bind ``rank``/``alpha`` and apply the rank mask. Marks ACTIVE on the
-    controller. Pure model-side: the SGLang push happens inside the next
-    ``update_weights()`` call.
+    bind ``rank``/``alpha`` and apply the rank mask. Pure local model
+    mutation — the controller transition to ACTIVE is done by the caller
+    after every rank has finished installing (see ``load_pending_adapters``).
 
     ``init_adapter_slot`` runs *after* ``load_adapter`` on purpose: the rank
     mask must be the source of truth for padded rows/cols. Saved shards
@@ -217,8 +221,6 @@ def _register_adapter(name: str, config: AdapterConfig, model) -> None:
     ``slice_lora_to_rank`` later is much worse than re-zeroing here.
     """
     from megatron.bridge.peft.multi_lora_layers import init_adapter_slot, load_adapter
-
-    from miles.backends.megatron_utils.initialize import is_megatron_main_rank
 
     from ..multi_lora import find_latest_checkpoint
 
@@ -238,9 +240,6 @@ def _register_adapter(name: str, config: AdapterConfig, model) -> None:
         logger.info(f"{log_prefix} loaded from {ckpt} ({loaded} tensors)")
 
     init_adapter_slot(model, config.slot, rank=config.rank, alpha=config.alpha)
-
-    if is_megatron_main_rank():
-        ray.get(get_multi_lora_controller().mark_active.remote(name))
     logger.info(f"{log_prefix} installed at slot {config.slot}")
 
 
@@ -250,11 +249,11 @@ def _deregister_adapter(name: str, config: AdapterConfig, rollout_id: int, args,
     SGLang unload happens earlier inside ``_send_multi_lora_params`` (which
     runs in the pause bracket of ``update_weights()``). This function only
     touches local trainer state: save final ckpt → clear slot → zero
-    optimizer state → mark REMOVED on controller.
+    optimizer state. The controller transition to REMOVED is done by the
+    caller after every rank has finished cleanup (see
+    ``unload_drained_adapters``).
     """
     from megatron.bridge.peft.multi_lora_layers import clear_adapter_slot
-
-    from miles.backends.megatron_utils.initialize import is_megatron_main_rank
 
     from ..multi_lora import zero_optimizer_state_for_adapter
 
@@ -268,10 +267,7 @@ def _deregister_adapter(name: str, config: AdapterConfig, rollout_id: int, args,
 
     zero_optimizer_state_for_adapter(optimizer, model, config.slot)
     optimizer.reload_model_params()
-
-    if is_megatron_main_rank():
-        ray.get(get_multi_lora_controller().mark_removed.remote(name))
-    logger.info(f"{log_prefix} fully removed")
+    logger.info(f"{log_prefix} cleared optimizer state for slot {config.slot}")
 
 
 def _adapters_in_state(state):
@@ -286,14 +282,33 @@ def load_pending_adapters(args, model, optimizer) -> int:
     whether the next ``update_weights()`` needs to push anything new to
     SGLang. Does NOT touch SGLang itself — that happens inside
     ``_send_multi_lora_params`` during ``update_weights()``.
+
+    Race-safety: every rank calls this and queries the controller for the
+    PENDING set. A naive implementation that mutates state inside the loop
+    (i.e., main rank flipping PENDING -> ACTIVE while other ranks are still
+    racing toward their query) leaves slow ranks with an empty pending list
+    and thus a slot that never had ``init_adapter_slot`` applied — its bf16
+    keeps construction-time xavier values, which then leak through as
+    ``lora_A padded dims are non-zero`` in ``slice_lora_to_rank``. The two
+    barriers + post-loop ``mark_active`` here are the entire point: every
+    rank reads the same PENDING set and every rank installs every slot
+    before any state flips.
     """
+    from miles.backends.megatron_utils.initialize import is_megatron_main_rank
     from miles.utils.adapter_config import AdapterState
 
+    if dist.is_initialized():
+        dist.barrier()
     pending = _adapters_in_state(AdapterState.PENDING)
     if not pending:
         return 0
     for name, config in pending:
         _register_adapter(name, config, model)
+    if dist.is_initialized():
+        dist.barrier()
+    if is_megatron_main_rank():
+        for name, _ in pending:
+            ray.get(get_multi_lora_controller().mark_active.remote(name))
     optimizer.reload_model_params()
     return len(pending)
 
@@ -305,10 +320,25 @@ def unload_drained_adapters(args, model, optimizer, rollout_id: int) -> int:
     Caller must have already run ``update_weights()`` after the adapter went
     DRAINED so SGLang has unloaded it; otherwise SGLang holds a reference to
     a slot we're about to clear.
+
+    Race-safety: same pattern as ``load_pending_adapters``. Two barriers
+    sandwich the local cleanup so every rank sees the same DRAINED set and
+    every rank finishes cleanup before main rank flips the controller to
+    REMOVED.
     """
+    from miles.backends.megatron_utils.initialize import is_megatron_main_rank
     from miles.utils.adapter_config import AdapterState
 
+    if dist.is_initialized():
+        dist.barrier()
     drained = _adapters_in_state(AdapterState.DRAINED)
+    if not drained:
+        return 0
     for name, config in drained:
         _deregister_adapter(name, config, rollout_id, args, model, optimizer)
+    if dist.is_initialized():
+        dist.barrier()
+    if is_megatron_main_rank():
+        for name, _ in drained:
+            ray.get(get_multi_lora_controller().mark_removed.remote(name))
     return len(drained)
