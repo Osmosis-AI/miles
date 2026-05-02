@@ -108,11 +108,17 @@ def initialize_multi_lora_model_and_optimizer(
 ):
     """Drop-in alternative to initialize_model_and_optimizer for multi-LoRA.
 
-    Builds model + optimizer and loads the base checkpoint. Adapter slots are
-    left empty — the first ``update_weights()`` call (already in the train
-    script before the loop) installs every PENDING adapter via
-    ``multi_lora_sync.register_adapter`` and pushes the result to SGLang in
-    one shot. Same return signature: (model, optimizer, scheduler, iteration).
+    Builds model + optimizer, loads the base checkpoint, then installs every
+    PENDING adapter the controller knows about *before* returning. This
+    matters: the actor's ``weights_backuper.backup("actor")`` snapshots the
+    model right after this returns, and the noop backuper asserts the hash
+    is unchanged on every subsequent ``get("actor")`` — so any slot
+    mutation that happens after the snapshot trips the assertion.
+
+    Online additions (adapters registered after training starts) are
+    installed by ``MegatronTrainRayActor.load_pending_adapters`` instead,
+    which re-snapshots the backuper afterwards. Same return signature as
+    ``initialize_model_and_optimizer``.
     """
     from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
 
@@ -159,6 +165,11 @@ def initialize_multi_lora_model_and_optimizer(
     clear_memory()
     check_model_hashes(args, model, iteration)
     opt_param_scheduler.step(increment=iteration * args.global_batch_size)
+
+    # Install every adapter the controller already knows about, before the
+    # caller's backuper takes its snapshot. See the docstring for why.
+    from .update_weight.multi_lora_sync import load_pending_adapters
+    load_pending_adapters(args, model, optimizer)
 
     return model, optimizer, opt_param_scheduler, iteration
 
