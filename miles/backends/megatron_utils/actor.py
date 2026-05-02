@@ -482,16 +482,17 @@ class MegatronTrainRayActor(TrainRayActor):
             ray.get(get_multi_lora_controller().report_training_completed.remote(rollout_id))
 
     @timer
-    def load_pending_adapters(self) -> None:
-        if is_multi_lora_enabled(self.args):
-            from .update_weight.multi_lora_sync import load_pending_adapters
-            load_pending_adapters(self.args, self.model, self.optimizer, self.weight_updater)
+    def load_pending_adapters(self) -> int:
+        if not is_multi_lora_enabled(self.args):
+            return 0
+        from .update_weight.multi_lora_sync import load_pending_adapters
+        return load_pending_adapters(self.args, self.model, self.optimizer)
 
     @timer
     def unload_drained_adapters(self, rollout_id: int) -> None:
         if is_multi_lora_enabled(self.args):
             from .update_weight.multi_lora_sync import unload_drained_adapters
-            unload_drained_adapters(self.args, self.model, self.optimizer, self.weight_updater, rollout_id)
+            unload_drained_adapters(self.args, self.model, self.optimizer, rollout_id)
 
     @timer
     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:

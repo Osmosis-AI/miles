@@ -1,24 +1,21 @@
-"""Multi-LoRA orchestration: lifecycle hooks the trainer calls each cycle.
+"""Multi-LoRA model-side orchestration.
 
-This module owns every multi-LoRA operation that touches model + optimizer +
-SGLang together, so the rest of the trainer (actor.py, update_weight_from_tensor.py)
-can stay multi-LoRA-agnostic apart from a one-line delegation.
+Two lifecycle hooks the train script calls each cycle, both *model-side only*:
 
-The four lifecycle entry points:
+- ``load_pending_adapters``  : PENDING -> ACTIVE (init slot + load ckpt)
+- ``unload_drained_adapters``: DRAINED -> REMOVED (save + clear slot + zero opt)
 
-- ``register_adapter``  : PENDING -> ACTIVE (model install + load ckpt)
-- ``deregister_adapter``: DRAINED -> REMOVED (save + SGLang unload + clear slot)
-- ``load_pending_adapters``  : batched ``register_adapter`` + per-adapter SGLang push
-- ``unload_drained_adapters``: batched ``deregister_adapter``
-- ``send_active_adapters_to_sglang``: per-cycle weight refresh for ACTIVE adapters
+Every SGLang interaction (push for ACTIVE, unload for DRAINED) lives inside
+``UpdateWeightFromTensor._send_multi_lora_params`` so it free-rides on the
+existing pause / flush / continue bracket of ``update_weights()`` — no new
+bracket logic anywhere.
 
 Plus checkpoint helpers (``save_multi_lora_checkpoints``, ``slice_lora_to_rank``).
 
-TODO(perf): re-sync only adapters that were trained this step. Right now
-``send_active_adapters_to_sglang`` re-IPCs every ACTIVE adapter every call, even
-when an adapter saw no data and its weights are unchanged. The hint already
-exists in ``rollout_data["adapter_slots"]`` (set by the train actor); plumbing
-it through cleanly is deferred — see chat 2026-04-28 for the design discussion.
+TODO(perf): re-sync only adapters trained this step. ``_send_multi_lora_params``
+currently re-IPCs every ACTIVE adapter every call, even when its weights are
+unchanged. The hint already exists in ``rollout_data["adapter_slots"]``;
+plumbing it through is deferred — see chat 2026-04-28.
 """
 
 import json
@@ -204,23 +201,14 @@ def save_multi_lora_checkpoints(
             dist.barrier()
 
 
-def register_adapter(
-    name: str,
-    config: AdapterConfig,
-    args,
-    model,
-):
-    """Install a PENDING adapter on the model.
+def _register_adapter(name: str, config: AdapterConfig, model) -> None:
+    """Install one PENDING adapter on this rank's local model shard.
 
-    Sets up the slot, loads the latest checkpoint (or random-inits), and
-    transitions the adapter PENDING → ACTIVE on the controller. The next
-    weight-sync (driven by the surrounding ``update_weights`` call) pushes the
-    new adapter to SGLang automatically via the controller-driven loop in
-    ``_send_multi_lora_params``.
-
-    Caller is responsible for ``optimizer.reload_model_params()`` once after a
-    batch of installs — required so the rank-mask propagates to the fp32 main
-    params.
+    Initialises the slot, loads the latest cross-rank-complete checkpoint
+    (or random-inits if none), and marks the adapter ACTIVE on the
+    controller. Pure model-side: the SGLang push for this adapter happens
+    inside the next ``update_weights()`` call, where it's bracketed by
+    pause / flush / continue.
     """
     from megatron.bridge.peft.multi_lora_layers import init_adapter_slot, load_adapter
 
@@ -250,22 +238,13 @@ def register_adapter(
     logger.info(f"{log_prefix} installed at slot {config.slot}")
 
 
-def deregister_adapter(
-    name: str,
-    config: AdapterConfig,
-    rollout_id: int,
-    args,
-    model,
-    optimizer,
-    ipc_engine=None,
-    ipc_gather_src=None,
-):
-    """Cross-system cleanup for a fully-drained adapter.
+def _deregister_adapter(name: str, config: AdapterConfig, rollout_id: int, args, model, optimizer) -> None:
+    """Model-side cleanup for one DRAINED adapter.
 
-    Runs once the controller has marked the adapter ``DRAINED`` (i.e. all
-    cycles that included it have finished training). Composes:
-    save → sglang unload → model-layer ``clear_adapter_slot`` → optimizer
-    zero → controller ``mark_removed`` (frees the slot).
+    SGLang unload happens earlier inside ``_send_multi_lora_params`` (which
+    runs in the pause bracket of ``update_weights()``). This function only
+    touches local trainer state: save final ckpt → clear slot → zero
+    optimizer state → mark REMOVED on controller.
     """
     from megatron.bridge.peft.multi_lora_layers import clear_adapter_slot
 
@@ -277,13 +256,6 @@ def deregister_adapter(
 
     save_multi_lora_checkpoints(args, model, rollout_id, {name: config})
     logger.info(f"{log_prefix} saved final checkpoint")
-
-    if ipc_engine is not None and dist.get_rank() == ipc_gather_src:
-        try:
-            ray.get(ipc_engine.unload_lora_adapter.remote(lora_name=name))
-        except Exception:
-            pass
-    logger.info(f"{log_prefix} unloaded from SGLang")
 
     clear_adapter_slot(model, config.slot)
     logger.info(f"{log_prefix} cleared adapter slot {config.slot}")
@@ -297,58 +269,37 @@ def deregister_adapter(
 
 
 def _adapters_in_state(state):
-    from miles.utils.adapter_config import AdapterState  # noqa: F401  (re-export for callers)
-
     configs = ray.get(get_multi_lora_controller().adapter_configs.remote())
     return [(n, c) for n, c in configs.items() if c.state == state]
 
 
-def load_pending_adapters(args, model, optimizer, weight_updater) -> None:
-    """PENDING -> ACTIVE: install on trainer + push to SGLang.
+def load_pending_adapters(args, model, optimizer) -> int:
+    """PENDING -> ACTIVE on every rank's local model shard.
 
-    Called at the top of each cycle (or by a fully-async reactor). The
-    per-adapter SGLang push happens here so a freshly-installed adapter is in
-    the inference engine before the next ``generate`` runs.
+    Returns the number of adapters installed so the train script knows
+    whether the next ``update_weights()`` needs to push anything new to
+    SGLang. Does NOT touch SGLang itself — that happens inside
+    ``_send_multi_lora_params`` during ``update_weights()``.
     """
     from miles.utils.adapter_config import AdapterState
 
     pending = _adapters_in_state(AdapterState.PENDING)
     if not pending:
-        return
+        return 0
     for name, config in pending:
-        register_adapter(name, config, args, model)
-        weight_updater.send_one_multi_lora_adapter(name, config, lora_loaded=False)
+        _register_adapter(name, config, model)
     optimizer.reload_model_params()
+    return len(pending)
 
 
-def unload_drained_adapters(args, model, optimizer, weight_updater, rollout_id: int) -> None:
-    """DRAINED -> REMOVED: save final ckpt, SGLang unload, clear slot, free.
+def unload_drained_adapters(args, model, optimizer, rollout_id: int) -> None:
+    """DRAINED -> REMOVED model-side cleanup.
 
-    Called after ``train()`` once the controller has flipped DRAINING -> DRAINED.
+    Caller must have already run ``update_weights()`` after the adapter went
+    DRAINED so SGLang has unloaded it; otherwise SGLang holds a reference to
+    a slot we're about to clear.
     """
     from miles.utils.adapter_config import AdapterState
 
     for name, config in _adapters_in_state(AdapterState.DRAINED):
-        deregister_adapter(
-            name=name,
-            config=config,
-            rollout_id=rollout_id,
-            args=args,
-            model=model,
-            optimizer=optimizer,
-            ipc_engine=weight_updater._ipc_engine,
-            ipc_gather_src=weight_updater._ipc_gather_src,
-        )
-
-
-def send_active_adapters_to_sglang(weight_updater) -> None:
-    """Per-cycle weight refresh: push every ACTIVE adapter's current weights.
-
-    Called from ``UpdateWeightFromTensor.update_weights`` for the multi-LoRA
-    case. Skips PENDING / DRAINING / DRAINED (those are handled by the
-    lifecycle hooks above, not by the per-cycle weight push).
-    """
-    from miles.utils.adapter_config import AdapterState
-
-    for name, config in _adapters_in_state(AdapterState.ACTIVE):
-        weight_updater.send_one_multi_lora_adapter(name, config, lora_loaded=True)
+        _deregister_adapter(name, config, rollout_id, args, model, optimizer)

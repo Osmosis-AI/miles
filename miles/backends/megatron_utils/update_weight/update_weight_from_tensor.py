@@ -71,6 +71,8 @@ class UpdateWeightFromTensor:
             self._lora_config = build_lora_sync_config(args)
             self._lora_loaded = False
             self._lora_base_synced = False
+        if self.is_multi_lora:
+            self._multi_lora_loaded: set[str] = set()
 
         # Create IPC gather groups within megatron.
         for start_rank in range(0, dist.get_world_size(), self.args.rollout_num_gpus_per_engine):
@@ -294,10 +296,34 @@ class UpdateWeightFromTensor:
             return refs or [], long_lived_tensors
 
     def _send_multi_lora_params(self) -> None:
-        """Per-cycle refresh of every ACTIVE adapter's weights in SGLang."""
-        from .multi_lora_sync import send_active_adapters_to_sglang
+        """Per-cycle SGLang sync for every adapter the controller knows about.
 
-        send_active_adapters_to_sglang(self)
+        Runs inside ``update_weights()``'s pause/flush/continue bracket, so
+        every ipc_engine call here is safe.
+
+        Per adapter:
+        - ACTIVE: push weights. ``lora_loaded=False`` on first push for an
+          adapter (creates SGLang slot), ``True`` on subsequent pushes
+          (unload + reload SGLang refresh).
+        - DRAINED: unload from SGLang and forget. Model-side cleanup is
+          handled separately by ``unload_drained_adapters``.
+        """
+        from miles.ray.multi_lora_controller import get_multi_lora_controller
+        from miles.utils.adapter_config import AdapterState
+
+        configs = ray.get(get_multi_lora_controller().adapter_configs.remote())
+        for name, config in configs.items():
+            if config.state == AdapterState.ACTIVE:
+                lora_loaded = name in self._multi_lora_loaded
+                self.send_one_multi_lora_adapter(name, config, lora_loaded=lora_loaded)
+                self._multi_lora_loaded.add(name)
+            elif config.state == AdapterState.DRAINED and name in self._multi_lora_loaded:
+                if dist.get_rank() == self._ipc_gather_src:
+                    try:
+                        ray.get(self._ipc_engine.unload_lora_adapter.remote(lora_name=name))
+                    except Exception:
+                        pass
+                self._multi_lora_loaded.discard(name)
 
     def send_one_multi_lora_adapter(self, adapter_name: str, config, lora_loaded: bool) -> None:
         """Push one adapter's weights to SGLang. ``lora_loaded=False`` on the

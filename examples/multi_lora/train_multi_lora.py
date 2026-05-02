@@ -48,6 +48,10 @@ async def train(args):
     rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
     actor_model, critic_model = await create_training_models(args, pgs, rollout_manager)
 
+    # PENDING -> ACTIVE for any adapters registered before training starts,
+    # so the initial update_weights() pushes them to SGLang in one shot.
+    await actor_model.load_pending_adapters()
+
     if args.offload_rollout:
         await rollout_manager.onload_weights.remote()
 
@@ -58,9 +62,16 @@ async def train(args):
 
     rollout_id = args.start_rollout_id
     while rollout_id < args.num_rollout:
-        # PENDING -> ACTIVE: install any newly-registered adapters before
-        # generate so they're in SGLang and the data source can emit for them.
-        await actor_model.load_pending_adapters()
+        # Online additions: install model-side, then re-sync to SGLang so the
+        # new adapter is reachable by this cycle's generate. The conditional
+        # avoids a wasteful base-weight resync when there's nothing new.
+        n_installed = await actor_model.load_pending_adapters()
+        if n_installed > 0:
+            if args.offload_rollout:
+                await rollout_manager.onload_weights.remote()
+            await actor_model.update_weights()
+            if args.offload_rollout:
+                await rollout_manager.onload_kv.remote()
 
         # Idle gate: nothing to do if no ACTIVE adapter. Don't advance rollout_id.
         configs = await controller.adapter_configs.remote()
@@ -85,11 +96,6 @@ async def train(args):
 
         await actor_model.train(rollout_id, rollout_data_ref)
 
-        # DRAINED -> REMOVED: cleanup any adapter that finished draining this
-        # cycle (controller flipped DRAINING -> DRAINED inside report_training_completed
-        # at the end of train()).
-        await actor_model.unload_drained_adapters(rollout_id)
-
         if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
             await actor_model.save_model(rollout_id)
 
@@ -98,11 +104,18 @@ async def train(args):
         else:
             await actor_model.clear_memory()
 
+        # update_weights pushes ACTIVE adapters AND unloads DRAINED ones from
+        # SGLang inside its existing pause/flush bracket — must run before the
+        # model-side cleanup below so SGLang releases the slot first.
         if args.offload_rollout:
             await rollout_manager.onload_weights.remote()
         await actor_model.update_weights()
         if args.offload_rollout:
             await rollout_manager.onload_kv.remote()
+
+        # DRAINED -> REMOVED: model-side cleanup (save final ckpt, clear slot,
+        # zero optimizer, mark REMOVED so the slot can be reused).
+        await actor_model.unload_drained_adapters(rollout_id)
 
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
             await rollout_manager.eval.remote(rollout_id)
