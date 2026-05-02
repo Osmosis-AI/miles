@@ -48,10 +48,11 @@ async def train(args):
     rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
     actor_model, critic_model = await create_training_models(args, pgs, rollout_manager)
 
-    # PENDING -> ACTIVE for any adapters registered before training starts,
-    # so the initial update_weights() pushes them to SGLang in one shot.
-    await actor_model.load_pending_adapters()
-
+    # Adapters that exist at startup are already installed by
+    # initialize_multi_lora_model_and_optimizer (before the actor's backuper
+    # snapshots), so the initial update_weights() below pushes them to SGLang
+    # in one shot. Mid-run additions are picked up by load_pending_adapters
+    # inside the loop.
     if args.offload_rollout:
         await rollout_manager.onload_weights.remote()
 
