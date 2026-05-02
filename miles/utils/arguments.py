@@ -1104,6 +1104,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=2,
                 help="Maximum number of concurrent adapter slots for multi-LoRA (default: 2)",
             )
+            parser.add_argument(
+                "--multi-lora-idle-poll-s",
+                type=float,
+                default=5.0,
+                help="When no adapter is ACTIVE, the trainer polls for new registrations every this many seconds (default: 5.0)",
+            )
             return parser
 
         def add_router_arguments(parser):

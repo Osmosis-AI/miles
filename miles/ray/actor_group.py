@@ -123,6 +123,16 @@ class RayTrainGroup:
         """Broadcast weights from rank 0 to all other ranks."""
         await self._broadcast("update_weights")
 
+    async def load_pending_adapters(self):
+        """Multi-LoRA: install any PENDING adapters into trainer model + SGLang.
+        No-op if multi-LoRA is disabled."""
+        await self._broadcast("load_pending_adapters")
+
+    async def unload_drained_adapters(self, rollout_id):
+        """Multi-LoRA: tear down any DRAINED adapters (save final ckpt, SGLang
+        unload, clear slot). No-op if multi-LoRA is disabled."""
+        await self._broadcast("unload_drained_adapters", rollout_id)
+
     async def onload(self):
         await self._broadcast("wake_up")
 

@@ -11,11 +11,8 @@ import dataclasses
 import logging
 from argparse import Namespace
 from pathlib import Path
-from typing import Mapping
 
 import torch
-
-from miles.utils.adapter_config import AdapterConfig
 
 logger = logging.getLogger(__name__)
 
@@ -107,12 +104,15 @@ def build_multi_lora_model(args: Namespace):
 
 def initialize_multi_lora_model_and_optimizer(
     args: Namespace,
-    adapter_configs: Mapping[str, AdapterConfig],
     role: str = "actor",
 ):
     """Drop-in alternative to initialize_model_and_optimizer for multi-LoRA.
 
-    Same return signature: (model, optimizer, scheduler, iteration).
+    Builds model + optimizer and loads the base checkpoint. Adapter slots are
+    left empty — the first ``update_weights()`` call (already in the train
+    script before the loop) installs every PENDING adapter via
+    ``multi_lora_sync.register_adapter`` and pushes the result to SGLang in
+    one shot. Same return signature: (model, optimizer, scheduler, iteration).
     """
     from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
 
@@ -128,11 +128,9 @@ def initialize_multi_lora_model_and_optimizer(
 
         filesystem_async_module.FileSystemWriterAsync = ROCmFileSystemWriterAsync
 
-    # Build model with MultiLoRA layers
     model, multi_lora = build_multi_lora_model(args)
     model[0].role = role
 
-    # Optimizer
     kwargs = {}
     for f in dataclasses.fields(OptimizerConfig):
         if hasattr(args, f.name):
@@ -146,7 +144,8 @@ def initialize_multi_lora_model_and_optimizer(
     )
     opt_param_scheduler = get_optimizer_param_scheduler(args, optimizer)
 
-    # Load base checkpoint — hide adapter params so the bridge doesn't try to map them
+    # Hide adapter params so the bridge's conversion-task walk doesn't see them
+    # while loading the base checkpoint.
     from megatron.bridge.peft.multi_lora_layers import hide_adapters
 
     clear_memory()
@@ -160,37 +159,6 @@ def initialize_multi_lora_model_and_optimizer(
     clear_memory()
     check_model_hashes(args, model, iteration)
     opt_param_scheduler.step(increment=iteration * args.global_batch_size)
-
-    # Register adapters and load per-adapter checkpoints
-    from megatron.bridge.peft.multi_lora_layers import init_adapter_slot, load_adapter
-
-    for name, config in adapter_configs.items():
-        init_adapter_slot(model, config.slot, rank=config.rank, alpha=config.alpha)
-        ckpt_root = config.dir / "checkpoints"
-        ckpt = find_latest_checkpoint(ckpt_root)
-        # Per-adapter prefix so Ray's log dedupe (which collapses identical
-        # repeated messages) keeps these distinct across adapters.
-        log_prefix = f"[multilora] ({name})"
-        if ckpt is None:
-            logger.info(
-                f"{log_prefix} no checkpoint found under {ckpt_root}, "
-                f"starting from random init"
-            )
-            continue
-        state_dict = torch.load(ckpt, map_location="cpu", weights_only=True)
-        loaded = load_adapter(model, config.slot, state_dict)
-        # Catch silent name-mismatch failures: a populated state_dict that
-        # writes nothing into the model means the saved schema drifted
-        # from what ``expose_adapter_slot`` + ``named_parameters`` yields.
-        assert loaded > 0, (
-            f"{log_prefix} loaded 0 tensors from {ckpt} "
-            f"(state_dict has {len(state_dict)} entries) — name mismatch?"
-        )
-        logger.info(f"{log_prefix} loaded from {ckpt} ({loaded} tensors)")
-
-    # Sync bf16 model params → fp32 optimizer main params so the rank
-    # masking applied by init_adapter_slot is reflected in the fp32 copies.
-    optimizer.reload_model_params()
 
     return model, optimizer, opt_param_scheduler, iteration
 

@@ -24,6 +24,7 @@ from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_
 
 from miles.ray.multi_lora_controller import create_multi_lora_controller
 from miles.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
+from miles.utils.adapter_config import AdapterState
 from miles.utils.arguments import parse_args
 from miles.utils.logging_utils import configure_logger
 from miles.utils.misc import should_run_periodic_action
@@ -55,9 +56,19 @@ async def train(args):
     if args.offload_rollout:
         await rollout_manager.onload_kv.remote()
 
-    for rollout_id in range(args.start_rollout_id, args.num_rollout):
-        await controller.apply_pending_lifecycle.remote(rollout_id)
-        await controller.report_generate_started.remote(rollout_id)
+    rollout_id = args.start_rollout_id
+    while rollout_id < args.num_rollout:
+        # PENDING -> ACTIVE: install any newly-registered adapters before
+        # generate so they're in SGLang and the data source can emit for them.
+        await actor_model.load_pending_adapters()
+
+        # Idle gate: nothing to do if no ACTIVE adapter. Don't advance rollout_id.
+        configs = await controller.adapter_configs.remote()
+        if AdapterState.ACTIVE not in {c.state for c in configs.values()}:
+            await asyncio.sleep(args.multi_lora_idle_poll_s)
+            continue
+
+        await controller.report_generation_started.remote(rollout_id)
 
         if args.eval_interval is not None and rollout_id == 0 and not args.skip_eval_before_train:
             await rollout_manager.eval.remote(rollout_id)
@@ -73,6 +84,11 @@ async def train(args):
             await rollout_manager.offload.remote(tags=offload_tags)
 
         await actor_model.train(rollout_id, rollout_data_ref)
+
+        # DRAINED -> REMOVED: cleanup any adapter that finished draining this
+        # cycle (controller flipped DRAINING -> DRAINED inside report_training_completed
+        # at the end of train()).
+        await actor_model.unload_drained_adapters(rollout_id)
 
         if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
             await actor_model.save_model(rollout_id)
@@ -90,6 +106,8 @@ async def train(args):
 
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
             await rollout_manager.eval.remote(rollout_id)
+
+        rollout_id += 1
 
     await rollout_manager.dispose.remote()
 

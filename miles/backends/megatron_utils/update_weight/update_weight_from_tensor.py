@@ -59,7 +59,6 @@ class UpdateWeightFromTensor:
         self.is_multi_lora = is_multi_lora
         self._lora_loaded = False
         self._lora_name = LORA_ADAPTER_NAME
-        self._multi_lora_loaded: set[str] = set()
 
         self._hf_weight_iterator = HfWeightIteratorBase.create(
             args=args,
@@ -295,48 +294,48 @@ class UpdateWeightFromTensor:
             return refs or [], long_lived_tensors
 
     def _send_multi_lora_params(self) -> None:
-        """Per-adapter LoRA weight export. Mirrors ``_send_lora_params`` for the
-        multi-LoRA case, fetching the adapter list from the controller and
-        looping over each registered slot."""
-        from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
+        """Per-cycle refresh of every ACTIVE adapter's weights in SGLang."""
+        from .multi_lora_sync import send_active_adapters_to_sglang
 
-        from miles.ray.multi_lora_controller import get_multi_lora_controller
+        send_active_adapters_to_sglang(self)
+
+    def send_one_multi_lora_adapter(self, adapter_name: str, config, lora_loaded: bool) -> None:
+        """Push one adapter's weights to SGLang. ``lora_loaded=False`` on the
+        first push (creates the SGLang slot using ``lora_config``);
+        ``lora_loaded=True`` on subsequent per-cycle refreshes."""
+        from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
 
         from .multi_lora_sync import slice_lora_to_rank
 
-        adapter_configs = ray.get(get_multi_lora_controller().adapter_configs.remote())
-        for adapter_name, config in adapter_configs.items():
-            adapter_rank = config.rank
-            lora_config = build_lora_sync_config(self.args)
-            lora_config["r"] = adapter_rank
-            lora_config["lora_alpha"] = config.alpha
+        adapter_rank = config.rank
+        lora_config = build_lora_sync_config(self.args)
+        lora_config["r"] = adapter_rank
+        lora_config["lora_alpha"] = config.alpha
 
-            with expose_adapter_slot(self.model, config.slot):
-                megatron_local_weights = self.weights_getter()
-                for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
-                    megatron_local_weights, weight_type="lora"
-                ):
-                    weight_tensors = [
-                        (n, slice_lora_to_rank(n, t, adapter_rank))
-                        for n, t in hf_named_tensors
-                        if is_lora_weight_name(n)
-                    ]
-                    if not weight_tensors:
-                        continue
-                    refs, long_lived_tensors = _send_to_colocated_engine(
-                        hf_named_tensors=weight_tensors,
-                        ipc_engine=self._ipc_engine,
-                        ipc_gather_src=self._ipc_gather_src,
-                        ipc_gather_group=self._ipc_gather_group,
-                        lora_config=lora_config,
-                        lora_name=adapter_name,
-                        lora_loaded=adapter_name in self._multi_lora_loaded,
-                    )
-                    if refs:
-                        _check_weight_sync_results(ray.get(refs), is_lora=True)
-                    del long_lived_tensors
-
-            self._multi_lora_loaded.add(adapter_name)
+        with expose_adapter_slot(self.model, config.slot):
+            megatron_local_weights = self.weights_getter()
+            for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
+                megatron_local_weights, weight_type="lora"
+            ):
+                weight_tensors = [
+                    (n, slice_lora_to_rank(n, t, adapter_rank))
+                    for n, t in hf_named_tensors
+                    if is_lora_weight_name(n)
+                ]
+                if not weight_tensors:
+                    continue
+                refs, long_lived_tensors = _send_to_colocated_engine(
+                    hf_named_tensors=weight_tensors,
+                    ipc_engine=self._ipc_engine,
+                    ipc_gather_src=self._ipc_gather_src,
+                    ipc_gather_group=self._ipc_gather_group,
+                    lora_config=lora_config,
+                    lora_name=adapter_name,
+                    lora_loaded=lora_loaded,
+                )
+                if refs:
+                    _check_weight_sync_results(ray.get(refs), is_lora=True)
+                del long_lived_tensors
 
 
 def _send_to_colocated_engine(
