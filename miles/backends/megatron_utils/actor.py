@@ -486,13 +486,23 @@ class MegatronTrainRayActor(TrainRayActor):
         if not is_multi_lora_enabled(self.args):
             return 0
         from .update_weight.multi_lora_sync import load_pending_adapters
-        return load_pending_adapters(self.args, self.model, self.optimizer)
+        n = load_pending_adapters(self.args, self.model, self.optimizer)
+        if n > 0:
+            # Re-snapshot: init_adapter_slot + load_adapter mutated the model,
+            # so the noop-backuper's recorded hash is now stale (would assert
+            # on the next weights_getter()). Mirrors the post-train backup
+            # pattern at the end of train().
+            self.weights_backuper.backup("actor")
+        return n
 
     @timer
     def unload_drained_adapters(self, rollout_id: int) -> None:
-        if is_multi_lora_enabled(self.args):
-            from .update_weight.multi_lora_sync import unload_drained_adapters
-            unload_drained_adapters(self.args, self.model, self.optimizer, rollout_id)
+        if not is_multi_lora_enabled(self.args):
+            return
+        from .update_weight.multi_lora_sync import unload_drained_adapters
+        n = unload_drained_adapters(self.args, self.model, self.optimizer, rollout_id)
+        if n > 0:
+            self.weights_backuper.backup("actor")
 
     @timer
     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:

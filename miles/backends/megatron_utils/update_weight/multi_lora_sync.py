@@ -292,8 +292,9 @@ def load_pending_adapters(args, model, optimizer) -> int:
     return len(pending)
 
 
-def unload_drained_adapters(args, model, optimizer, rollout_id: int) -> None:
-    """DRAINED -> REMOVED model-side cleanup.
+def unload_drained_adapters(args, model, optimizer, rollout_id: int) -> int:
+    """DRAINED -> REMOVED model-side cleanup. Returns count for the caller's
+    backuper-refresh decision.
 
     Caller must have already run ``update_weights()`` after the adapter went
     DRAINED so SGLang has unloaded it; otherwise SGLang holds a reference to
@@ -301,5 +302,7 @@ def unload_drained_adapters(args, model, optimizer, rollout_id: int) -> None:
     """
     from miles.utils.adapter_config import AdapterState
 
-    for name, config in _adapters_in_state(AdapterState.DRAINED):
+    drained = _adapters_in_state(AdapterState.DRAINED)
+    for name, config in drained:
         _deregister_adapter(name, config, rollout_id, args, model, optimizer)
+    return len(drained)
