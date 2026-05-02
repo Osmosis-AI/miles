@@ -293,19 +293,25 @@ def load_pending_adapters(args, model, optimizer) -> int:
     barriers + post-loop ``mark_active`` here are the entire point: every
     rank reads the same PENDING set and every rank installs every slot
     before any state flips.
+
+    Barriers use the gloo group (CPU-side) on purpose: this runs between
+    cycles right after ``update_weights`` / SGLang IPC, where the NCCL
+    default group can still have in-flight ops on CUDA streams; an NCCL
+    barrier here surfaces as ``cudaErrorIllegalAddress``.
     """
     from miles.backends.megatron_utils.initialize import is_megatron_main_rank
     from miles.utils.adapter_config import AdapterState
+    from miles.utils.distributed_utils import get_gloo_group
 
     if dist.is_initialized():
-        dist.barrier()
+        dist.barrier(group=get_gloo_group())
     pending = _adapters_in_state(AdapterState.PENDING)
     if not pending:
         return 0
     for name, config in pending:
         _register_adapter(name, config, model)
     if dist.is_initialized():
-        dist.barrier()
+        dist.barrier(group=get_gloo_group())
     if is_megatron_main_rank():
         for name, _ in pending:
             ray.get(get_multi_lora_controller().mark_active.remote(name))
@@ -321,23 +327,24 @@ def unload_drained_adapters(args, model, optimizer, rollout_id: int) -> int:
     DRAINED so SGLang has unloaded it; otherwise SGLang holds a reference to
     a slot we're about to clear.
 
-    Race-safety: same pattern as ``load_pending_adapters``. Two barriers
-    sandwich the local cleanup so every rank sees the same DRAINED set and
-    every rank finishes cleanup before main rank flips the controller to
-    REMOVED.
+    Race-safety: same pattern as ``load_pending_adapters``. Two gloo
+    barriers sandwich the local cleanup so every rank sees the same DRAINED
+    set and every rank finishes cleanup before main rank flips the
+    controller to REMOVED.
     """
     from miles.backends.megatron_utils.initialize import is_megatron_main_rank
     from miles.utils.adapter_config import AdapterState
+    from miles.utils.distributed_utils import get_gloo_group
 
     if dist.is_initialized():
-        dist.barrier()
+        dist.barrier(group=get_gloo_group())
     drained = _adapters_in_state(AdapterState.DRAINED)
     if not drained:
         return 0
     for name, config in drained:
         _deregister_adapter(name, config, rollout_id, args, model, optimizer)
     if dist.is_initialized():
-        dist.barrier()
+        dist.barrier(group=get_gloo_group())
     if is_megatron_main_rank():
         for name, _ in drained:
             ray.get(get_multi_lora_controller().mark_removed.remote(name))
