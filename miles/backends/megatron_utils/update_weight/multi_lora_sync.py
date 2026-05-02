@@ -204,11 +204,17 @@ def save_multi_lora_checkpoints(
 def _register_adapter(name: str, config: AdapterConfig, model) -> None:
     """Install one PENDING adapter on this rank's local model shard.
 
-    Initialises the slot, loads the latest cross-rank-complete checkpoint
-    (or random-inits if none), and marks the adapter ACTIVE on the
-    controller. Pure model-side: the SGLang push for this adapter happens
-    inside the next ``update_weights()`` call, where it's bracketed by
-    pause / flush / continue.
+    Loads the latest cross-rank-complete checkpoint into the slot (or leaves
+    construction-time values if none), then runs ``init_adapter_slot`` to
+    bind ``rank``/``alpha`` and apply the rank mask. Marks ACTIVE on the
+    controller. Pure model-side: the SGLang push happens inside the next
+    ``update_weights()`` call.
+
+    ``init_adapter_slot`` runs *after* ``load_adapter`` on purpose: the rank
+    mask must be the source of truth for padded rows/cols. Saved shards
+    can carry non-zero padded values (older code paths, mid-run rank
+    changes, copy-pasted checkpoints) and silently breaking
+    ``slice_lora_to_rank`` later is much worse than re-zeroing here.
     """
     from megatron.bridge.peft.multi_lora_layers import init_adapter_slot, load_adapter
 
@@ -217,8 +223,6 @@ def _register_adapter(name: str, config: AdapterConfig, model) -> None:
     from ..multi_lora import find_latest_checkpoint
 
     log_prefix = f"[multilora] ({name})"
-
-    init_adapter_slot(model, config.slot, rank=config.rank, alpha=config.alpha)
 
     ckpt_root = config.dir / "checkpoints"
     ckpt = find_latest_checkpoint(ckpt_root)
@@ -232,6 +236,8 @@ def _register_adapter(name: str, config: AdapterConfig, model) -> None:
             f"(state_dict has {len(state_dict)} entries) — name mismatch?"
         )
         logger.info(f"{log_prefix} loaded from {ckpt} ({loaded} tensors)")
+
+    init_adapter_slot(model, config.slot, rank=config.rank, alpha=config.alpha)
 
     if is_megatron_main_rank():
         ray.get(get_multi_lora_controller().mark_active.remote(name))
