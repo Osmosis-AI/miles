@@ -83,12 +83,16 @@ class MultiLoRAController:
         logger.info(f"Adapter '{name}' ACTIVE")
 
     def deregister_adapter(self, name: str) -> None:
-        """Transition ACTIVE -> DRAINING immediately and snap the drain target.
+        """Transition ACTIVE -> DRAINING (or straight to DRAINED) and snap the
+        drain target.
 
         The drain target is the most recently started rollout_id, i.e. the
         last cycle that may have included this adapter. The adapter promotes
         to DRAINED once :meth:`report_training_completed` reports that cycle
-        has finished training.
+        has finished training. If the trainer is already idle past that
+        target (no in-flight rollout for this adapter), we skip DRAINING
+        entirely so wait/idle phases don't get stuck holding a half-released
+        slot.
         """
         if name not in self.configs:
             raise KeyError(f"Adapter '{name}' is not registered")
@@ -96,11 +100,14 @@ class MultiLoRAController:
         if cur.state != AdapterState.ACTIVE:
             logger.info(f"Adapter '{name}' already in {cur.state.name}; ignoring deregister")
             return
-        self.configs[name] = dataclasses.replace(cur, state=AdapterState.DRAINING)
-        self.drain_until_rollout_id[name] = self.last_started_rollout_id
-        logger.info(
-            f"Adapter '{name}' DRAINING (drain_until_rollout_id={self.last_started_rollout_id})"
-        )
+        target = self.last_started_rollout_id
+        self.drain_until_rollout_id[name] = target
+        if self.last_trained_rollout_id >= target:
+            self.configs[name] = dataclasses.replace(cur, state=AdapterState.DRAINED)
+            logger.info(f"Adapter '{name}' DRAINED (immediate, drain_until_rollout_id={target})")
+        else:
+            self.configs[name] = dataclasses.replace(cur, state=AdapterState.DRAINING)
+            logger.info(f"Adapter '{name}' DRAINING (drain_until_rollout_id={target})")
 
     def report_generation_started(self, rollout_id: int) -> None:
         if rollout_id > self.last_started_rollout_id:
