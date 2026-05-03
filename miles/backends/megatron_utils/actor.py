@@ -485,24 +485,40 @@ class MegatronTrainRayActor(TrainRayActor):
     def load_pending_adapters(self) -> int:
         if not is_multi_lora_enabled(self.args):
             return 0
-        from .update_weight.multi_lora_sync import load_pending_adapters
-        n = load_pending_adapters(self.args, self.model, self.optimizer)
-        if n > 0:
-            # Re-snapshot: init_adapter_slot + load_adapter mutated the model,
-            # so the noop-backuper's recorded hash is now stale (would assert
-            # on the next weights_getter()). Mirrors the post-train backup
-            # pattern at the end of train().
-            self.weights_backuper.backup("actor")
-        return n
+        # In colocate mode, the previous update_weights/save_model leaves
+        # the reloadable NCCL groups destroyed; find_latest_checkpoint and
+        # init_adapter_slot/load_adapter both touch mpu and would crash
+        # without these. Mirrors the bracket in update_weights/save_model.
+        if self.args.offload_train:
+            reload_process_groups()
+        try:
+            from .update_weight.multi_lora_sync import load_pending_adapters
+            n = load_pending_adapters(self.args, self.model, self.optimizer)
+            if n > 0:
+                # Re-snapshot: init_adapter_slot + load_adapter mutated the model,
+                # so the noop-backuper's recorded hash is now stale (would assert
+                # on the next weights_getter()). Mirrors the post-train backup
+                # pattern at the end of train().
+                self.weights_backuper.backup("actor")
+            return n
+        finally:
+            if self.args.offload_train:
+                destroy_process_groups()
 
     @timer
     def unload_drained_adapters(self, rollout_id: int) -> None:
         if not is_multi_lora_enabled(self.args):
             return
-        from .update_weight.multi_lora_sync import unload_drained_adapters
-        n = unload_drained_adapters(self.args, self.model, self.optimizer, rollout_id)
-        if n > 0:
-            self.weights_backuper.backup("actor")
+        if self.args.offload_train:
+            reload_process_groups()
+        try:
+            from .update_weight.multi_lora_sync import unload_drained_adapters
+            n = unload_drained_adapters(self.args, self.model, self.optimizer, rollout_id)
+            if n > 0:
+                self.weights_backuper.backup("actor")
+        finally:
+            if self.args.offload_train:
+                destroy_process_groups()
 
     @timer
     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
