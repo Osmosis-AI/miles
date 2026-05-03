@@ -64,15 +64,14 @@ async def train(args):
     rollout_id = args.start_rollout_id
     while rollout_id < args.num_rollout:
         # Online additions: install model-side, then re-sync to SGLang so the
-        # new adapter is reachable by this cycle's generate. The conditional
-        # avoids a wasteful base-weight resync when there's nothing new.
+        # new adapter is reachable by this cycle's generate. SGLang is already
+        # loaded at this point (idle phases don't offload it, productive
+        # cycles end with onload_kv) so update_weights pushes directly —
+        # calling onload_weights here would resume already-resumed memory
+        # and crash the SGLang HTTP server.
         n_installed = await actor_model.load_pending_adapters()
         if n_installed > 0:
-            if args.offload_rollout:
-                await rollout_manager.onload_weights.remote()
             await actor_model.update_weights()
-            if args.offload_rollout:
-                await rollout_manager.onload_kv.remote()
 
         # Idle gate: nothing to do if no ACTIVE adapter. Don't advance rollout_id.
         configs = await controller.adapter_configs.remote()

@@ -71,19 +71,19 @@ def _log_state(prefix: str, configs: dict) -> None:
     logger.info(f"{prefix} {', '.join(parts)}")
 
 
-async def _drain_drained(args, controller, rollout_manager, actor_model, rollout_id: int) -> bool:
+async def _drain_drained(args, controller, actor_model, rollout_id: int) -> bool:
     """If any adapter is DRAINED, push to SGLang (which unloads it) and free
     the model-side slot so the same name can be re-registered later. Returns
     True if any cleanup happened.
+
+    Called from idle phases where SGLang is already loaded (it was never
+    offloaded — that only happens around generate). update_weights pushes
+    directly; no onload_weights/onload_kv bracket here.
     """
     configs = await controller.adapter_configs.remote()
     if not any(c.state == AdapterState.DRAINED for c in configs.values()):
         return False
-    if args.offload_rollout:
-        await rollout_manager.onload_weights.remote()
     await actor_model.update_weights()
-    if args.offload_rollout:
-        await rollout_manager.onload_kv.remote()
     await actor_model.unload_drained_adapters(rollout_id)
     return True
 
@@ -134,14 +134,12 @@ async def train(args):
             phase_started = True
 
         # Online additions: install model-side, then re-sync to SGLang so
-        # this cycle's generate can reach the new adapter.
+        # this cycle's generate can reach the new adapter. SGLang is already
+        # loaded at this point (idle phases don't offload it, and productive
+        # cycles end with onload_kv), so update_weights pushes directly.
         n_installed = await actor_model.load_pending_adapters()
         if n_installed > 0:
-            if args.offload_rollout:
-                await rollout_manager.onload_weights.remote()
             await actor_model.update_weights()
-            if args.offload_rollout:
-                await rollout_manager.onload_kv.remote()
 
         configs = await controller.adapter_configs.remote()
         _log_state(f"[scripted] phase '{phase.name}' iter {iters_in_phase}:", configs)
@@ -149,7 +147,7 @@ async def train(args):
         if AdapterState.ACTIVE not in {c.state for c in configs.values()}:
             # No active adapter — drain any leftovers from the previous
             # phase, then sleep one idle tick.
-            if await _drain_drained(args, controller, rollout_manager, actor_model, rollout_id):
+            if await _drain_drained(args, controller, actor_model, rollout_id):
                 logger.info(f"[scripted] drained DRAINED adapters during idle phase '{phase.name}'")
             await asyncio.sleep(args.multi_lora_idle_poll_s)
             iters_in_phase += 1
