@@ -216,24 +216,43 @@ def find_latest_checkpoint(ckpt_dir: Path) -> Path | None:
 
 
 def zero_optimizer_state_for_adapter(optimizer, model, idx: int) -> None:
-    """Zero Adam exp_avg/exp_avg_sq for a specific adapter slot's parameters."""
-    from megatron.bridge.peft.multi_lora_layers import MultiLoRALinear, SimpleMultiLoRALinear, _iter_multi_lora_modules
+    """Zero Adam exp_avg/exp_avg_sq for a specific adapter slot's parameters.
 
-    target_params = set()
+    Megatron's distributed optimizer keeps a separate fp32 master shard per
+    bf16 model param and keys its state by the master, not the model param.
+    The bf16 param exposes a ``.main_param`` attribute pointing at the
+    matching shard (set during ``get_megatron_optimizer``); we redirect
+    through it so the state lookup actually hits.
+
+    Without this, deregistering an adapter leaves stale Adam moments on
+    its slot. When the slot is later reused (re-registration of the same
+    name, or a different adapter that lands on the same free slot), the
+    first Adam step issues ``-lr * exp_avg / (sqrt(exp_avg_sq) + eps)`` on
+    rows whose grad is zero — drifting padded rows off zero by a few
+    micro-units per step, which ``slice_lora_to_rank`` then rejects.
+    """
+    from megatron.bridge.peft.multi_lora_layers import (
+        MultiLoRALinear,
+        SimpleMultiLoRALinear,
+        _iter_multi_lora_modules,
+    )
+
+    target_main_params = set()
     for module in _iter_multi_lora_modules(model):
-        if isinstance(module, MultiLoRALinear):
-            adapter = module.adapters[idx]
-            for param in adapter.parameters():
-                target_params.add(id(param))
-        elif isinstance(module, SimpleMultiLoRALinear):
-            adapter = module.adapters[idx]
-            for param in adapter.parameters():
-                target_params.add(id(param))
+        if not isinstance(module, (MultiLoRALinear, SimpleMultiLoRALinear)):
+            continue
+        adapter = module.adapters[idx]
+        for param in adapter.parameters():
+            main = getattr(param, "main_param", None)
+            target_main_params.add(id(main if main is not None else param))
 
-    for chained_optimizer in optimizer.chained_optimizers:
-        for param, state in chained_optimizer.optimizer.state.items():
-            if id(param) in target_params:
-                if "exp_avg" in state:
-                    state["exp_avg"].zero_()
-                if "exp_avg_sq" in state:
-                    state["exp_avg_sq"].zero_()
+    chained = getattr(optimizer, "chained_optimizers", [optimizer])
+    for chained_optimizer in chained:
+        inner = getattr(chained_optimizer, "optimizer", chained_optimizer)
+        for param, state in inner.state.items():
+            if id(param) not in target_main_params:
+                continue
+            if "exp_avg" in state:
+                state["exp_avg"].zero_()
+            if "exp_avg_sq" in state:
+                state["exp_avg_sq"].zero_()
