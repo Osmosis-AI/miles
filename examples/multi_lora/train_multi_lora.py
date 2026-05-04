@@ -74,8 +74,13 @@ async def train(args):
             await actor_model.update_weights()
 
         # Idle gate: nothing to do if no ACTIVE adapter. Don't advance rollout_id.
+        # Still drain any DRAINED adapters from a prior cycle so their slots
+        # can be reused by a future register.
         configs = await controller.adapter_configs.remote()
         if AdapterState.ACTIVE not in {c.state for c in configs.values()}:
+            if any(c.state == AdapterState.DRAINED for c in configs.values()):
+                await actor_model.update_weights()
+                await actor_model.unload_drained_adapters(rollout_id)
             await asyncio.sleep(args.multi_lora_idle_poll_s)
             continue
 

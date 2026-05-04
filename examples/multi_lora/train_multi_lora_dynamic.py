@@ -1,24 +1,23 @@
-"""Multi-LoRA training that exercises online add/remove via a fixed schedule.
+"""Dynamic test for the multi-LoRA online add/remove lifecycle.
 
-Drives a hard-coded sequence of register/deregister events to verify the
-dynamic adapter lifecycle end-to-end:
+Runs the standard train loop alongside a small scheduler task that fires
+register/deregister events at predefined points. The trainer reacts via
+its existing lifecycle hooks (``load_pending_adapters``, the idle gate,
+``unload_drained_adapters``) — it has no knowledge of the schedule.
 
-  Phase 1: wait N iters — no adapters
-  Phase 2: register dapo_math, run N productive cycles
-  Phase 3: register gsm8k, run N productive cycles (both active)
-  Phase 4: deregister dapo_math, run N productive cycles (gsm8k only)
-  Phase 5: deregister gsm8k, wait N iters — no adapters
-  Phase 6: register gsm8k (re-loads from checkpoint), run N productive cycles
-  Phase 7: register dapo_math (re-loads from checkpoint), run remaining cycles
-
-Adapters live on disk under ``--multi-lora-dir/<name>/adapter.yaml``.
-This script does NOT register anything at startup — every register/
-deregister fires from the schedule below.
+Schedule:
+  1. idle 30s (no adapters)
+  2. register dapo_math   -> wait 3 productive cycles
+  3. register gsm8k       -> wait 3 productive cycles (both active)
+  4. deregister dapo_math -> wait 3 productive cycles (gsm8k only)
+  5. deregister gsm8k     -> idle 30s (no adapters)
+  6. register gsm8k       -> wait 3 productive cycles
+  7. register dapo_math   -> trainer runs to --num-rollout
 """
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import ray
@@ -37,74 +36,53 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class Phase:
-    """One step in the dynamic schedule.
-
-    ``register`` / ``deregister`` fire once at the start of the phase.
-    ``duration`` is the number of loop iterations to spend in this phase
-    (counts both wait-loops and productive cycles); ``-1`` means "until
-    the trainer reaches ``args.num_rollout``".
-    """
-
+class Step:
     name: str
-    register: tuple[str, ...] = field(default_factory=tuple)
-    deregister: tuple[str, ...] = field(default_factory=tuple)
-    duration: int = 3
+    register: tuple[str, ...] = ()
+    deregister: tuple[str, ...] = ()
+    wait_cycles: int = 0
+    wait_seconds: float = 0.0
 
 
-PHASES: tuple[Phase, ...] = (
-    Phase("wait_no_adapters", duration=3),
-    Phase("load_dapo", register=("dapo_math",), duration=3),
-    Phase("load_gsm8k", register=("gsm8k",), duration=3),
-    Phase("unload_dapo", deregister=("dapo_math",), duration=3),
-    Phase("unload_gsm8k_then_wait", deregister=("gsm8k",), duration=3),
-    Phase("reload_gsm8k", register=("gsm8k",), duration=3),
-    Phase("reload_dapo_until_end", register=("dapo_math",), duration=-1),
+SCHEDULE: tuple[Step, ...] = (
+    Step("idle1",              wait_seconds=30.0),
+    Step("load_dapo",          register=("dapo_math",), wait_cycles=3),
+    Step("load_gsm8k",         register=("gsm8k",),     wait_cycles=3),
+    Step("unload_dapo",        deregister=("dapo_math",), wait_cycles=3),
+    Step("unload_gsm8k_idle",  deregister=("gsm8k",),   wait_seconds=30.0),
+    Step("reload_gsm8k",       register=("gsm8k",),     wait_cycles=3),
+    Step("reload_dapo_to_end", register=("dapo_math",)),
 )
 
 
-def _log_state(prefix: str, configs: dict) -> None:
-    if not configs:
-        logger.info(f"{prefix} no adapters")
-        return
-    parts = [f"{n}={c.state.name}(slot={c.slot})" for n, c in configs.items()]
-    logger.info(f"{prefix} {', '.join(parts)}")
+async def run_schedule(controller, multi_lora_dir: Path) -> None:
+    """Drive register/deregister events. Talks only to the controller."""
+    for step in SCHEDULE:
+        logger.info(f"[schedule] >>> {step.name}")
+        for name in step.register:
+            ray.get(controller.register_adapter.remote(str(multi_lora_dir / name)))
+            logger.info(f"[schedule] registered {name}")
+        for name in step.deregister:
+            ray.get(controller.deregister_adapter.remote(name))
+            logger.info(f"[schedule] deregistered {name}")
+
+        if step.wait_seconds > 0:
+            await asyncio.sleep(step.wait_seconds)
+        if step.wait_cycles > 0:
+            start = await controller.get_last_started_rollout_id.remote()
+            target = start + step.wait_cycles
+            while True:
+                cur = await controller.get_last_started_rollout_id.remote()
+                if cur >= target:
+                    break
+                await asyncio.sleep(2.0)
+        logger.info(f"[schedule] <<< {step.name} done")
+    logger.info("[schedule] all steps done; trainer continues to --num-rollout")
 
 
-async def _drain_drained(args, controller, actor_model, rollout_id: int) -> bool:
-    """If any adapter is DRAINED, push to SGLang (which unloads it) and free
-    the model-side slot so the same name can be re-registered later. Returns
-    True if any cleanup happened.
-
-    Called from idle phases where SGLang is already loaded (it was never
-    offloaded — that only happens around generate). update_weights pushes
-    directly; no onload_weights/onload_kv bracket here.
-    """
-    configs = await controller.adapter_configs.remote()
-    if not any(c.state == AdapterState.DRAINED for c in configs.values()):
-        return False
-    await actor_model.update_weights()
-    await actor_model.unload_drained_adapters(rollout_id)
-    return True
-
-
-async def train(args):
-    configure_logger()
-    pgs = create_placement_groups(args)
-    init_tracking(args)
-
-    # No startup registration — the schedule below drives every register
-    # and deregister. The controller still needs to exist before any
-    # consumer (rollout manager, train workers) tries to look it up.
-    controller = create_multi_lora_controller(args.multi_lora_n_adapters, args.lora_rank)
-
-    args.data_source_path = "miles.rollout.multi_lora_data_source.MultiLoRADataSource"
-
-    rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
-    actor_model, _critic_model = await create_training_models(args, pgs, rollout_manager)
-
-    # Push base weights once so SGLang has something coherent to generate
-    # with even before any adapter shows up.
+async def run_trainer(args, controller, rollout_manager, actor_model, num_rollout_per_epoch) -> None:
+    """Standard multi-LoRA train loop. Identical structure to
+    train_multi_lora.py — the dynamic test doesn't change the trainer."""
     if args.offload_rollout:
         await rollout_manager.onload_weights.remote()
     await actor_model.update_weights()
@@ -112,49 +90,17 @@ async def train(args):
         await rollout_manager.onload_kv.remote()
 
     rollout_id = args.start_rollout_id
-    phase_idx = 0
-    iters_in_phase = 0
-    phase_started = False
-
-    while rollout_id < args.num_rollout and phase_idx < len(PHASES):
-        phase = PHASES[phase_idx]
-
-        if not phase_started:
-            logger.info(
-                f"[scripted] >>> phase {phase_idx + 1}/{len(PHASES)} "
-                f"'{phase.name}' (rollout_id={rollout_id})"
-            )
-            for name in phase.register:
-                adapter_dir = Path(args.multi_lora_dir) / name
-                ray.get(controller.register_adapter.remote(str(adapter_dir)))
-                logger.info(f"[scripted] registered '{name}' from {adapter_dir}")
-            for name in phase.deregister:
-                ray.get(controller.deregister_adapter.remote(name))
-                logger.info(f"[scripted] deregistered '{name}'")
-            phase_started = True
-
-        # Online additions: install model-side, then re-sync to SGLang so
-        # this cycle's generate can reach the new adapter. SGLang is already
-        # loaded at this point (idle phases don't offload it, and productive
-        # cycles end with onload_kv), so update_weights pushes directly.
+    while rollout_id < args.num_rollout:
         n_installed = await actor_model.load_pending_adapters()
         if n_installed > 0:
             await actor_model.update_weights()
 
         configs = await controller.adapter_configs.remote()
-        _log_state(f"[scripted] phase '{phase.name}' iter {iters_in_phase}:", configs)
-
         if AdapterState.ACTIVE not in {c.state for c in configs.values()}:
-            # No active adapter — drain any leftovers from the previous
-            # phase, then sleep one idle tick.
-            if await _drain_drained(args, controller, actor_model, rollout_id):
-                logger.info(f"[scripted] drained DRAINED adapters during idle phase '{phase.name}'")
+            if any(c.state == AdapterState.DRAINED for c in configs.values()):
+                await actor_model.update_weights()
+                await actor_model.unload_drained_adapters(rollout_id)
             await asyncio.sleep(args.multi_lora_idle_poll_s)
-            iters_in_phase += 1
-            if phase.duration != -1 and iters_in_phase >= phase.duration:
-                phase_idx += 1
-                iters_in_phase = 0
-                phase_started = False
             continue
 
         await controller.report_generation_started.remote(rollout_id)
@@ -182,8 +128,6 @@ async def train(args):
         else:
             await actor_model.clear_memory()
 
-        # Push ACTIVE adapters and unload DRAINED ones from SGLang inside
-        # update_weights' pause bracket; then free model-side slots.
         if args.offload_rollout:
             await rollout_manager.onload_weights.remote()
         await actor_model.update_weights()
@@ -196,20 +140,28 @@ async def train(args):
             await rollout_manager.eval.remote(rollout_id)
 
         rollout_id += 1
-        iters_in_phase += 1
 
-        if phase.duration != -1 and iters_in_phase >= phase.duration:
-            phase_idx += 1
-            iters_in_phase = 0
-            phase_started = False
-
-    logger.info(
-        f"[scripted] all done at rollout_id={rollout_id} "
-        f"(phase_idx={phase_idx}/{len(PHASES)})"
-    )
     await rollout_manager.dispose.remote()
+
+
+async def main(args):
+    configure_logger()
+    pgs = create_placement_groups(args)
+    init_tracking(args)
+
+    # No startup registration — the schedule task drives all events.
+    controller = create_multi_lora_controller(args.multi_lora_n_adapters, args.lora_rank)
+    args.data_source_path = "miles.rollout.multi_lora_data_source.MultiLoRADataSource"
+
+    rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
+    actor_model, _critic_model = await create_training_models(args, pgs, rollout_manager)
+
+    await asyncio.gather(
+        run_trainer(args, controller, rollout_manager, actor_model, num_rollout_per_epoch),
+        run_schedule(controller, Path(args.multi_lora_dir)),
+    )
 
 
 if __name__ == "__main__":
     args = parse_args()
-    asyncio.run(train(args))
+    asyncio.run(main(args))

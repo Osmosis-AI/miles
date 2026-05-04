@@ -143,3 +143,6 @@ class MultiLoRAController:
 
     def adapter_configs(self) -> dict[str, AdapterConfig]:
         return dict(self.configs)
+
+    def get_last_started_rollout_id(self) -> int:
+        return self.last_started_rollout_id
