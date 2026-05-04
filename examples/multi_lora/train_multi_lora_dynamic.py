@@ -66,16 +66,30 @@ async def run_schedule(controller, multi_lora_dir: Path) -> None:
             ray.get(controller.deregister_adapter.remote(name))
             logger.info(f"[schedule] deregistered {name}")
 
-        if step.wait_seconds > 0:
-            await asyncio.sleep(step.wait_seconds)
+        # Sample the cycle baseline now so wait_cycles counts cycles started
+        # from this point (the productive cycle handling the deregister, if
+        # any, is included).
+        cycle_target = None
         if step.wait_cycles > 0:
             start = await controller.get_last_started_rollout_id.remote()
-            target = start + step.wait_cycles
-            while True:
-                cur = await controller.get_last_started_rollout_id.remote()
-                if cur >= target:
-                    break
+            cycle_target = start + step.wait_cycles
+
+        if step.wait_seconds > 0:
+            await asyncio.sleep(step.wait_seconds)
+        if cycle_target is not None:
+            while await controller.get_last_started_rollout_id.remote() < cycle_target:
                 await asyncio.sleep(2.0)
+
+        # Hard prereq for the next step: any name we just deregistered must
+        # actually be gone from the controller before we move on. Otherwise
+        # a follow-up register on the same name fails with "already
+        # registered" (deregister flips state to DRAINING/DRAINED; only
+        # unload_drained_adapters frees the slot and removes the entry).
+        for name in step.deregister:
+            while name in (await controller.adapter_configs.remote()):
+                await asyncio.sleep(2.0)
+            logger.info(f"[schedule] {name} removed from controller")
+
         logger.info(f"[schedule] <<< {step.name} done")
     logger.info("[schedule] all steps done; trainer continues to --num-rollout")
 
