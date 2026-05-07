@@ -126,7 +126,7 @@ async def run_trainer(args, controller, rollout_manager, actor_model, num_rollou
     rollout_id = args.start_rollout_id
     def should_run_train(adapter_configs):
         valid_states = { AdapterState.ACTIVE, AdapterState.DRAINING_TRAINABLE, AdapterState.DRAINING_INFLIGHT, AdapterState.DRAINING_DATASOURCE }
-        return any(config.state in valid_states for config in adapter_configs)
+        return any(config.state in valid_states for config in adapter_configs.values())
 
     while True:
         adapter_configs = await controller.adapter_configs.remote()
