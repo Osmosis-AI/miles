@@ -95,8 +95,6 @@ async def run_schedule(controller, multi_lora_dir: Path, shared_state: list[int]
 
 
 async def run_trainer(args, controller, rollout_manager, actor_model, num_rollout_per_epoch, shared_state: list[int]) -> None:
-    """Standard multi-LoRA train loop. Identical structure to
-    train_multi_lora.py — the dynamic test doesn't change the trainer."""
     if args.offload_rollout:
         await rollout_manager.onload_weights.remote()
 
@@ -115,6 +113,16 @@ async def run_trainer(args, controller, rollout_manager, actor_model, num_rollou
         else:
             await actor_model.clear_memory()
 
+    async def offload_rollout():
+        # Offload if need to train or if need to update adapters
+        if args.offload_rollout:
+            offload_tags = [GPU_MEMORY_TYPE_CUDA_GRAPH]
+            if "kv_cache" in args.offload_rollout_level:
+                offload_tags.append(GPU_MEMORY_TYPE_KV_CACHE)
+            if "weight" in args.offload_rollout_level:
+                offload_tags.append(GPU_MEMORY_TYPE_WEIGHTS)
+            await rollout_manager.offload.remote(tags=offload_tags)
+
     async def save(rollout_id):
         await actor_model.save_model(
             rollout_id,
@@ -128,48 +136,49 @@ async def run_trainer(args, controller, rollout_manager, actor_model, num_rollou
         valid_states = { AdapterState.ACTIVE, AdapterState.DRAINING_TRAINABLE, AdapterState.DRAINING_INFLIGHT, AdapterState.DRAINING_DATASOURCE }
         return any(config.state in valid_states for config in adapter_configs.values())
 
+    def should_update_adapters(adapter_configs):
+        valid_states = { AdapterState.PENDING, AdapterState.DRAINED }
+        return any(config.state in valid_states for config in adapter_configs.values())
+
+    # TODO: improve loop readability
     while True:
         adapter_configs = await controller.adapter_configs.remote()
         run_train = should_run_train(adapter_configs)
+        update_adapters = should_update_adapters(adapter_configs)
 
+        # Start: assume rollout is loaded
         if run_train:
             rollout_data_ref = await rollout_manager.generate.remote(rollout_id)
+            await offload_rollout()
 
-            if args.offload_rollout:
-                offload_tags = [GPU_MEMORY_TYPE_CUDA_GRAPH]
-                if "kv_cache" in args.offload_rollout_level:
-                    offload_tags.append(GPU_MEMORY_TYPE_KV_CACHE)
-                if "weight" in args.offload_rollout_level:
-                    offload_tags.append(GPU_MEMORY_TYPE_WEIGHTS)
-                await rollout_manager.offload.remote(tags=offload_tags)
+            await actor_model.train(rollout_id, rollout_data_ref)
 
-            actor_model.train(rollout_id, rollout_data_ref)
             if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
                 await save(rollout_id)
 
+        if update_adapters:
+            # Train already offloads the rollout
+            if not run_train:
+                await offload_rollout()
+
+            n_loaded = await actor_model.load_pending_adapters()
+            n_unloaded = await actor_model.unload_drained_adapters(rollout_id)
+
+        # Both cases need to push weights
+        if run_train or update_adapters:
+            # Push the weights to sglang
             await offload_train()
             if args.offload_rollout:
                 await rollout_manager.onload_weights.remote()
             await actor_model.update_weights()
             if args.offload_rollout:
                 await rollout_manager.onload_kv.remote()
-            rollout_id += 1
-            shared_state[0] = rollout_id
 
-        n_loaded = await actor_model.load_pending_adapters()
-        n_unloaded = await actor_model.unload_drained_adapters(rollout_id)
-
-        # Finally, update the weights to sglang
-        if n_loaded + n_unloaded > 0 or run_train:
-            await offload_train()
-            actor_model.update_weights()
-
-            if args.offload_rollout:
-                await rollout_manager.onload_weights.remote()
-            await actor_model.update_weights()
-            if args.offload_rollout:
-                await rollout_manager.onload_kv.remote()
+            if run_train:
+                rollout_id += 1
+                shared_state[0] = rollout_id
         else:
+            print("Nothing to do: sleeping for 5s")
             await asyncio.sleep(5)
 
     await rollout_manager.dispose.remote()
