@@ -156,7 +156,7 @@ async def run_trainer(args, controller, rollout_manager, actor_model, num_rollou
             rollout_id += 1
             shared_state[0] = rollout_id
 
-        n_loaded = actor_model.load_pending_adapters(rollout_id)
+        n_loaded = actor_model.load_pending_adapters()
         n_unloaded = actor_model.unload_drained_adapters(rollout_id)
 
         # Finally, update the weights to sglang

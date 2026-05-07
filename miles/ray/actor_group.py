@@ -135,6 +135,7 @@ class RayTrainGroup:
         """Multi-LoRA: model-side cleanup of DRAINED adapters (save final ckpt,
         clear slot, zero optimizer). Caller must run ``update_weights`` first so
         SGLang has unloaded the adapter. No-op if multi-LoRA is disabled."""
+        # TODO: track iteration individually?
         await self._broadcast("unload_drained_adapters", rollout_id)
 
     async def onload(self):
