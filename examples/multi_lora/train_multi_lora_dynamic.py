@@ -176,6 +176,7 @@ async def run_trainer(args, controller, rollout_manager, actor_model, num_rollou
                 await rollout_manager.onload_kv.remote()
 
             if run_train:
+                await controller.report_training_completed.remote(rollout_id)
                 rollout_id += 1
                 shared_state[0] = rollout_id
         else:

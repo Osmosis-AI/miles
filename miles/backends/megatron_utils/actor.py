@@ -476,11 +476,6 @@ class MegatronTrainRayActor(TrainRayActor):
 
         log_perf_data(rollout_id, self.args)
 
-        if is_multi_lora_enabled(self.args):
-            from miles.ray.multi_lora_controller import get_multi_lora_controller
-
-            ray.get(get_multi_lora_controller().report_training_completed.remote(rollout_id))
-
     @timer
     def load_pending_adapters(self) -> int:
         if not is_multi_lora_enabled(self.args):
@@ -492,8 +487,8 @@ class MegatronTrainRayActor(TrainRayActor):
         if not any(c.state == AdapterState.PENDING for c in configs.values()):
             return 0
         # TODO: verify if it fits in patterns to offload and wakeup here
-        if self.args.offload_train:
-            self.wake_up()
+        # if self.args.offload_train:
+        #     self.wake_up()
 
         from .update_weight.multi_lora_sync import load_pending_adapters
         n = load_pending_adapters(self.args, self.model, self.optimizer)
@@ -504,8 +499,8 @@ class MegatronTrainRayActor(TrainRayActor):
             # pattern at the end of train().
             self.weights_backuper.backup("actor")
 
-        if self.args.offload_train:
-            self.sleep()
+        # if self.args.offload_train:
+        #     self.sleep()
         return n
 
     @timer
@@ -517,15 +512,15 @@ class MegatronTrainRayActor(TrainRayActor):
         configs = ray.get(get_multi_lora_controller().adapter_configs.remote())
         if not any(c.state == AdapterState.DRAINED for c in configs.values()):
             return 0
-        if self.args.offload_train:
-            self.wake_up()
+        # if self.args.offload_train:
+        #     self.wake_up()
         from .update_weight.multi_lora_sync import unload_drained_adapters
         n = unload_drained_adapters(self.args, self.model, self.optimizer, rollout_id)
         if n > 0:
             self.weights_backuper.backup("actor")
 
-        if self.args.offload_train:
-            self.sleep()
+        # if self.args.offload_train:
+        #     self.sleep()
         return n
 
     @timer
