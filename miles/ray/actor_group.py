@@ -136,7 +136,8 @@ class RayTrainGroup:
         clear slot, zero optimizer). Caller must run ``update_weights`` first so
         SGLang has unloaded the adapter. No-op if multi-LoRA is disabled."""
         # TODO: track iteration individually?
-        await self._broadcast("unload_drained_adapters", rollout_id)
+        results = await self._broadcast("unload_drained_adapters", rollout_id)
+        return results[0] if results else 0
 
     async def onload(self):
         await self._broadcast("wake_up")

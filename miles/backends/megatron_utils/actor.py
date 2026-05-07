@@ -509,22 +509,24 @@ class MegatronTrainRayActor(TrainRayActor):
         return n
 
     @timer
-    def unload_drained_adapters(self, rollout_id: int) -> None:
+    def unload_drained_adapters(self, rollout_id: int) -> int:
         if not is_multi_lora_enabled(self.args):
-            return
+            return 0
         from miles.ray.multi_lora_controller import get_multi_lora_controller
         from miles.utils.adapter_config import AdapterState
         configs = ray.get(get_multi_lora_controller().adapter_configs.remote())
         if not any(c.state == AdapterState.DRAINED for c in configs.values()):
-            return
+            return 0
         if self.args.offload_train:
             self.wake_up()
         from .update_weight.multi_lora_sync import unload_drained_adapters
         n = unload_drained_adapters(self.args, self.model, self.optimizer, rollout_id)
         if n > 0:
             self.weights_backuper.backup("actor")
+
         if self.args.offload_train:
             self.sleep()
+        return n
 
     @timer
     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
