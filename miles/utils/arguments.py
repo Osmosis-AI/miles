@@ -1110,6 +1110,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=5.0,
                 help="When no adapter is ACTIVE, the trainer polls for new registrations every this many seconds (default: 5.0)",
             )
+            parser.add_argument(
+                "--custom-generate-state-path",
+                type=str,
+                default=None,
+                help="Path to custom miles.rollout.sglang_rollout.GenerateState",
+            )
             return parser
 
         def add_router_arguments(parser):

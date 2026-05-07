@@ -106,20 +106,6 @@ def initialize_multi_lora_model_and_optimizer(
     args: Namespace,
     role: str = "actor",
 ):
-    """Drop-in alternative to initialize_model_and_optimizer for multi-LoRA.
-
-    Builds model + optimizer, loads the base checkpoint, then installs every
-    PENDING adapter the controller knows about *before* returning. This
-    matters: the actor's ``weights_backuper.backup("actor")`` snapshots the
-    model right after this returns, and the noop backuper asserts the hash
-    is unchanged on every subsequent ``get("actor")`` — so any slot
-    mutation that happens after the snapshot trips the assertion.
-
-    Online additions (adapters registered after training starts) are
-    installed by ``MegatronTrainRayActor.load_pending_adapters`` instead,
-    which re-snapshots the backuper afterwards. Same return signature as
-    ``initialize_model_and_optimizer``.
-    """
     from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
 
     from miles.backends.megatron_utils.checkpoint import load_checkpoint
@@ -175,20 +161,6 @@ def initialize_multi_lora_model_and_optimizer(
 
 
 def find_latest_checkpoint(ckpt_dir: Path) -> Path | None:
-    """Find the latest *cross-rank-complete* step checkpoint.
-
-    Walks ``step_*`` directories from highest-numbered to lowest and returns
-    the first one that contains the per-rank shard for *every* (tp, pp) tile,
-    not just this rank's. This guarantees all ranks pick the same step on
-    load — without it, asymmetric partial saves (rank 0 wrote, rank 1 didn't)
-    would have ranks loading different versions of the same slot, silently
-    corrupting the model. Each rank then returns its own ``tp{tp}_pp{pp}.pt``
-    path from the chosen step.
-
-    Atomic saves (``_tmp_step_N`` → ``step_N`` rename) make every fresh
-    checkpoint complete by construction; this guard exists for legacy
-    partial saves left on disk by the pre-atomic-save code.
-    """
     if not ckpt_dir.exists():
         return None
 
@@ -216,21 +188,6 @@ def find_latest_checkpoint(ckpt_dir: Path) -> Path | None:
 
 
 def zero_optimizer_state_for_adapter(optimizer, model, idx: int) -> None:
-    """Zero Adam exp_avg/exp_avg_sq for a specific adapter slot's parameters.
-
-    Megatron's distributed optimizer keeps a separate fp32 master shard per
-    bf16 model param and keys its state by the master, not the model param.
-    The bf16 param exposes a ``.main_param`` attribute pointing at the
-    matching shard (set during ``get_megatron_optimizer``); we redirect
-    through it so the state lookup actually hits.
-
-    Without this, deregistering an adapter leaves stale Adam moments on
-    its slot. When the slot is later reused (re-registration of the same
-    name, or a different adapter that lands on the same free slot), the
-    first Adam step issues ``-lr * exp_avg / (sqrt(exp_avg_sq) + eps)`` on
-    rows whose grad is zero — drifting padded rows off zero by a few
-    micro-units per step, which ``slice_lora_to_rank`` then rejects.
-    """
     from megatron.bridge.peft.multi_lora_layers import (
         MultiLoRALinear,
         SimpleMultiLoRALinear,
@@ -239,6 +196,7 @@ def zero_optimizer_state_for_adapter(optimizer, model, idx: int) -> None:
 
     target_main_params = set()
     for module in _iter_multi_lora_modules(model):
+        # TODO: remove SimpleMultiLoRALinear
         if not isinstance(module, (MultiLoRALinear, SimpleMultiLoRALinear)):
             continue
         adapter = module.adapters[idx]

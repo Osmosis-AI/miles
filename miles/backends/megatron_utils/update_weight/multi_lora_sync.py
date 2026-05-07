@@ -35,14 +35,6 @@ logger = logging.getLogger(__name__)
 
 
 def slice_lora_to_rank(hf_name: str, tensor: torch.Tensor, adapter_rank: int) -> torch.Tensor:
-    """Slice a LoRA weight tensor from max_rank down to ``adapter_rank`` for export.
-
-    The padded rows (lora_A) / cols (lora_B) must be exactly zero — that's the
-    rank-mask invariant that ``init_adapter_slot`` sets up and the autograd
-    chain (zero grad through both sides) preserves. The asserts here catch
-    invariant violations early; tracking down ``max=0.114`` (xavier ~4σ) in
-    SGLang weeks later is much worse.
-    """
     if "lora_A" in hf_name and adapter_rank < tensor.shape[0]:
         remainder = tensor[adapter_rank:]
         assert remainder.abs().max() == 0, (
@@ -118,11 +110,6 @@ def save_multi_lora_checkpoints(
         # repeated messages) keeps these distinct across adapters.
         log_prefix = f"[multilora] ({adapter_name})"
 
-        # Atomic save: write everything to a temp dir, then on success rename
-        # to the final step_N path. The temp name does not start with ``step_``,
-        # so ``find_latest_checkpoint`` ignores it even mid-write — a crash
-        # leaves an orphan ``_tmp_step_N`` rather than a half-populated
-        # ``step_N`` masquerading as the latest valid checkpoint.
         final_dir = config.dir / "checkpoints" / f"step_{iteration}"
         tmp_dir = config.dir / "checkpoints" / f"_tmp_step_{iteration}"
         if is_dp_rank_0:
@@ -276,29 +263,6 @@ def _adapters_in_state(state):
 
 
 def load_pending_adapters(args, model, optimizer) -> int:
-    """PENDING -> ACTIVE on every rank's local model shard.
-
-    Returns the number of adapters installed so the train script knows
-    whether the next ``update_weights()`` needs to push anything new to
-    SGLang. Does NOT touch SGLang itself — that happens inside
-    ``_send_multi_lora_params`` during ``update_weights()``.
-
-    Race-safety: every rank calls this and queries the controller for the
-    PENDING set. A naive implementation that mutates state inside the loop
-    (i.e., main rank flipping PENDING -> ACTIVE while other ranks are still
-    racing toward their query) leaves slow ranks with an empty pending list
-    and thus a slot that never had ``init_adapter_slot`` applied — its bf16
-    keeps construction-time xavier values, which then leak through as
-    ``lora_A padded dims are non-zero`` in ``slice_lora_to_rank``. The two
-    barriers + post-loop ``mark_active`` here are the entire point: every
-    rank reads the same PENDING set and every rank installs every slot
-    before any state flips.
-
-    Barriers use the gloo group (CPU-side) on purpose: this runs between
-    cycles right after ``update_weights`` / SGLang IPC, where the NCCL
-    default group can still have in-flight ops on CUDA streams; an NCCL
-    barrier here surfaces as ``cudaErrorIllegalAddress``.
-    """
     from miles.backends.megatron_utils.initialize import is_megatron_main_rank
     from miles.utils.adapter_config import AdapterState
     from miles.utils.distributed_utils import get_gloo_group
@@ -308,13 +272,16 @@ def load_pending_adapters(args, model, optimizer) -> int:
     pending = _adapters_in_state(AdapterState.PENDING)
     if not pending:
         return 0
+
     for name, config in pending:
         _register_adapter(name, config, model)
+
     if dist.is_initialized():
         dist.barrier(group=get_gloo_group())
+
     if is_megatron_main_rank():
         for name, _ in pending:
-            ray.get(get_multi_lora_controller().mark_active.remote(name))
+            ray.get(get_multi_lora_controller().update_adapter_state.remote(name, AdapterState.ACTIVE))
     optimizer.reload_model_params()
     return len(pending)
 

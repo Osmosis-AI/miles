@@ -15,6 +15,8 @@ from pathlib import Path
 import ray
 
 from miles.utils.adapter_config import AdapterConfig, AdapterState, parse_adapter_yaml
+from miles.utils.types import Sample
+from miles.rollout.sglang_rollout import GenerateState
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +29,88 @@ def create_multi_lora_controller(max_adapters: int, max_rank: int):
 
 
 def get_multi_lora_controller():
-    """Return the named controller handle. Call from anywhere after creation."""
     return ray.get_actor(CONTROLLER_NAME)
+
+class MultiLoRAGenerateState(GenerateState):
+    def __init__(self, args):
+        super().__init__(args)
+
+        self.in_flight_group_count: dict[str, int] = {}
+        self.trainable_group_count: dict[str, int] = {}
+
+    def on_group_submit(self, group: list[Sample], task):
+        assert group[0].adapter is not None
+        adapter_name = group[0].adapter.name
+
+        # Count in-flight groups and groups awaiting training (those selected by generate_rollout) per adapter
+        if adapter_name not in self.in_flight_group_count:
+            self.in_flight_group_count[adapter_name] = 0
+
+        # Increment by 1 on submit
+        self.in_flight_group_count[adapter_name] += 1
+
+        def callback(task):
+            failed = task.cancelled() or task.exception() is not None
+            # Decrement by 1 on completion
+            self.in_flight_group_count[adapter_name] -= 1
+
+            assert self.in_flight_group_count[adapter_name] >= 0, "in-flight group count went below zero, there is an error tracking in-flight groups"
+
+        task.add_done_callback(callback)
+
+    def on_group_selected(self, group: list[Sample] | list[list[Sample]]) -> None:
+        sample = group[0] if isinstance(group[0], Sample) else group[0][0]
+
+        assert sample.adapter is not None
+
+        adapter_name = sample.adapter.name
+        if adapter_name not in self.trainable_group_count:
+            self.trainable_group_count[adapter_name] = 0
+
+        self.trainable_group_count[adapter_name] += 1
+
+    def on_generate_rollout_complete(self,
+        rollout_id: int,
+        completed_samples: list[list[Sample]] | list[list[list[Sample]]],
+        aborted_samples: list[list[Sample]]) -> None:
+
+        controller = get_multi_lora_controller()
+        adapter_configs = ray.get(controller.adapter_configs.remote())
+
+        inflight_drained = []
+        for name, config in adapter_configs:
+            n_inflight = self.in_flight_group_count.get(name, 0)
+
+            if config.state == AdapterState.DRAINING_INFLIGHT:
+                if n_inflight == 0:
+                    inflight_drained.append(name)
+                    del self.in_flight_group_count[name]
+        ray.get(controller.update_adapter_state.remote(inflight_drained, AdapterState.DRAINING_TRAINABLE))
+
+        # Get updated adapter configs
+        adapter_configs = ray.get(controller.adapter_configs.remote())
+
+        # Track how many groups per adapter are waiting to be trained
+        to_mark = []
+        for group in completed_samples:
+            sample = group[0] if isinstance(group[0], Sample) else group[0][0]
+            assert sample.adapter is not None
+
+            adapter_name = sample.adapter.name
+            self.trainable_group_count[adapter_name] -= 1
+
+            assert self.trainable_group_count[adapter_name] >= 0, "trainable group count went below zero, there is an error tracking trainable groups"
+            assert adapter_name in adapter_configs
+
+            # If this is the last group that needs to be trained, update the rollout id on the
+            # multilora controller to indicate this is the last rollout id to be trained before lora deregistration
+            config = adapter_configs[adapter_name]
+            n_trainable = self.trainable_group_count[adapter_name]
+            if config.state == AdapterState.DRAINING_TRAINABLE and n_trainable == 0:
+                to_mark.append(adapter_name)
+
+                del self.trainable_group_count[adapter_name]
+        ray.get(controller.mark_last_training_rollout_id.remote(to_mark, rollout_id))
 
 
 @ray.remote(num_cpus=0)
@@ -38,16 +120,18 @@ class MultiLoRAController:
         self.max_rank = max_rank
         self.configs: dict[str, AdapterConfig] = {}
         self.free_slots: set[int] = set(range(max_adapters))
+
+        #### Used for dynamic register/deregister lora adapters
+        # Last rollout id that started generating
         self.last_started_rollout_id: int = -1
+        # Last rollout id that was trained
         self.last_trained_rollout_id: int = -1
+        # Map from adapter name -> rollout id
+        # Any samples in rollout id after map[adapter_name] does not contain
+        # the samples corresponding to adapter_name
         self.drain_until_rollout_id: dict[str, int] = {}
 
     def register_adapter(self, adapter_dir: str) -> dict:
-        """Assign a slot and mark PENDING. Fails fast if no slots are free.
-
-        The trainer picks up PENDING adapters in its next install pass and
-        transitions them to ACTIVE via :meth:`mark_active`.
-        """
         config = parse_adapter_yaml(Path(adapter_dir) / "adapter.yaml")
         assert config.rank <= self.max_rank, (
             f"Adapter '{config.name}' rank ({config.rank}) exceeds max rank ({self.max_rank})"
@@ -66,63 +150,59 @@ class MultiLoRAController:
         logger.info(f"Registered adapter '{config.name}' at slot {slot} (PENDING)")
         return {"name": config.name, "slot": slot}
 
-    def mark_active(self, name: str) -> None:
-        """Promote PENDING -> ACTIVE. Idempotent (no-op if already ACTIVE
-        or no longer registered)."""
-        if name not in self.configs:
-            return
-        cur = self.configs[name]
-        if cur.state == AdapterState.ACTIVE:
-            return
-        if cur.state != AdapterState.PENDING:
-            logger.warning(
-                f"mark_active called on '{name}' in state {cur.state.name}; ignoring"
-            )
-            return
-        self.configs[name] = dataclasses.replace(cur, state=AdapterState.ACTIVE)
-        logger.info(f"Adapter '{name}' ACTIVE")
+    def update_adapter_state(self, names: str | list[str], state: AdapterState):
+        if isinstance(names, str):
+            names = [names]
+
+        for name in names:
+            if name not in self.configs:
+                raise KeyError(f"Adapter '{name}' is not registered")
+
+            config = self.configs[name]
+
+            # Prevent invalid transitions
+            # e.g. prevent transitioning backwards
+            assert config.state < state, f"Cannot transition {config.state} to {state}"
+
+            self.configs[name] = dataclasses.replace(config, state=state)
 
     def deregister_adapter(self, name: str) -> None:
-        """Transition ACTIVE -> DRAINING (or straight to DRAINED) and snap the
-        drain target.
-
-        The drain target is the most recently started rollout_id, i.e. the
-        last cycle that may have included this adapter. The adapter promotes
-        to DRAINED once :meth:`report_training_completed` reports that cycle
-        has finished training. If the trainer is already idle past that
-        target (no in-flight rollout for this adapter), we skip DRAINING
-        entirely so wait/idle phases don't get stuck holding a half-released
-        slot.
-        """
         if name not in self.configs:
             raise KeyError(f"Adapter '{name}' is not registered")
-        cur = self.configs[name]
-        if cur.state != AdapterState.ACTIVE:
-            logger.info(f"Adapter '{name}' already in {cur.state.name}; ignoring deregister")
-            return
-        target = self.last_started_rollout_id
-        self.drain_until_rollout_id[name] = target
-        if self.last_trained_rollout_id >= target:
-            self.configs[name] = dataclasses.replace(cur, state=AdapterState.DRAINED)
-            logger.info(f"Adapter '{name}' DRAINED (immediate, drain_until_rollout_id={target})")
-        else:
-            self.configs[name] = dataclasses.replace(cur, state=AdapterState.DRAINING)
-            logger.info(f"Adapter '{name}' DRAINING (drain_until_rollout_id={target})")
 
-    def report_generation_started(self, rollout_id: int) -> None:
-        if rollout_id > self.last_started_rollout_id:
-            self.last_started_rollout_id = rollout_id
+        config = self.configs[name]
+        match config.state:
+            # PENDING implies nothing has happened yet, so we can safely remove
+            case AdapterState.PENDING:
+                self.configs[name] = dataclasses.replace(config, state=AdapterState.DRAINED)
+            case bdapterState.ACTIVE:
+                self.configs[name] = dataclasses.replace(config, state=AdapterState.DRAINING_DATASOURCE)
+            case _:
+                logger.info(f"Adapter '{name}' already in {config.state.name}; ignoring deregister")
 
+    # Mark for the adapter to be available to be removed after iter #rollout_id is marked completed
+    def mark_last_training_rollout_id(self, names: str | list[str], rollout_id: int) -> None:
+        if isinstance(names, str):
+            names = [names]
+
+        for name in names:
+            if name in self.drain_until_rollout_id:
+                # Take max for safety if it already exists, though this case shouldn't happen
+                self.drain_until_rollout_id[name] = max(self.drain_until_rollout_id[name], rollout_id)
+            else:
+                self.drain_until_rollout_id[name] = rollout_id
+
+    # Update the latest rollout generation id completed
     def report_training_completed(self, rollout_id: int) -> None:
-        """Bump last_trained_rollout_id; promote DRAINING adapters whose
-        drain target is now met."""
-        if rollout_id > self.last_trained_rollout_id:
-            self.last_trained_rollout_id = rollout_id
+        self.last_trained_rollout_id = max(rollout_id, self.last_trained_rollout_id)
+
+        # For all DRAINING adapters, update their status to DRAINED
+        # if the last trained rollout id is past their drain target
         for name, target in list(self.drain_until_rollout_id.items()):
             if name not in self.configs:
                 continue
             cur = self.configs[name]
-            if cur.state != AdapterState.DRAINING:
+            if cur.state != AdapterState.DRAINING_TRAINABLE:
                 continue
             if self.last_trained_rollout_id >= target:
                 self.configs[name] = dataclasses.replace(cur, state=AdapterState.DRAINED)

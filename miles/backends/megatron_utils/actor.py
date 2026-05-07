@@ -485,20 +485,16 @@ class MegatronTrainRayActor(TrainRayActor):
     def load_pending_adapters(self) -> int:
         if not is_multi_lora_enabled(self.args):
             return 0
-        # Cheap early-out: this method is polled at the top of every loop
-        # iteration, but most iterations have nothing to install. Skip the
-        # wake/sleep round-trip when there's no pending work.
+
         from miles.ray.multi_lora_controller import get_multi_lora_controller
         from miles.utils.adapter_config import AdapterState
         configs = ray.get(get_multi_lora_controller().adapter_configs.remote())
         if not any(c.state == AdapterState.PENDING for c in configs.values()):
             return 0
-        # In colocate mode the actor is offloaded between cycles
-        # (memory_saver paused, NCCL groups destroyed). load_pending_adapters
-        # mutates GPU model params (init_adapter_slot.zero_, load_adapter
-        # .copy_) and queries mpu, so it needs the actor fully awake.
+        # TODO: verify if it fits in patterns to offload and wakeup here
         if self.args.offload_train:
             self.wake_up()
+
         from .update_weight.multi_lora_sync import load_pending_adapters
         n = load_pending_adapters(self.args, self.model, self.optimizer)
         if n > 0:
@@ -507,6 +503,7 @@ class MegatronTrainRayActor(TrainRayActor):
             # on the next weights_getter()). Mirrors the post-train backup
             # pattern at the end of train().
             self.weights_backuper.backup("actor")
+
         if self.args.offload_train:
             self.sleep()
         return n

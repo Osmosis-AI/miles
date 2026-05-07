@@ -4,21 +4,22 @@ Each adapter directory contains an adapter.yaml. Lifecycle state is owned
 by ``MultiLoRAController`` and snapshotted onto each ``AdapterConfig``.
 """
 
-import enum
+from enum import IntEnum, auto
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
 
-class AdapterState(enum.IntEnum):
+class AdapterState(IntEnum):
     """PENDING → ACTIVE → DRAINING → DRAINED → REMOVED."""
 
-    PENDING = 0   # registered, awaiting install (PR3)
-    ACTIVE = 1    # installed, emitting samples
-    DRAINING = 2  # deregister requested; data source skips emission
-    DRAINED = 3   # all in-flight work trained; ready for cleanup
-    REMOVED = 4   # cleanup done, slot freed
+    PENDING = auto()             # registered, awaiting install
+    ACTIVE = auto()              # installed, emitting samples
+    DRAINING_DATASOURCE = auto() # data source has been blocked
+    DRAINING_INFLIGHT = auto()   # waiting for all in-flight requests to be drained
+    DRAINING_TRAINABLE = auto()  # waiting for all trainable to be drained
+    DRAINED = auto()             # all in-flight work trained; ready for cleanup
 
 
 @dataclass(frozen=True)
@@ -35,7 +36,7 @@ class AdapterConfig:
     label_key: str | None = None
     rm_type: str | None = None
     custom_rm_path: str | None = None
-    max_epochs: int | None = None
+    num_epochs: int = 1
     slot: int = -1
     state: AdapterState = AdapterState.PENDING
 
@@ -55,5 +56,5 @@ def parse_adapter_yaml(path: Path) -> AdapterConfig:
         label_key=raw.get("label_key"),
         rm_type=raw.get("rm_type"),
         custom_rm_path=raw.get("custom_rm_path"),
-        max_epochs=raw.get("max_epochs"),
+        num_epochs=raw.get("num_epochs"),
     )

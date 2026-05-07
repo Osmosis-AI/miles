@@ -1,5 +1,5 @@
 """Multi-LoRA data source: round-robins ``get_samples`` across ACTIVE
-adapters only. Reaching ``max_epochs`` triggers ``deregister_adapter``;
+adapters only. Reaching ``num_epochs`` triggers ``deregister_adapter``;
 the trainer's lifecycle gate drives the rest of the state machine.
 """
 
@@ -49,6 +49,7 @@ class MultiLoRADataSource(DataSource):
         adapter_args.prompt_data = config.data
         adapter_args.input_key = config.input_key or self.args.input_key
         adapter_args.label_key = config.label_key or self.args.label_key
+        # TODO: metadata key
         return RolloutDataSource(adapter_args)
 
     def get_samples(self, num_samples: int) -> list[list[Sample]]:
@@ -56,23 +57,23 @@ class MultiLoRADataSource(DataSource):
         self._reconcile(configs)
 
         active_names = [n for n in self.sources if configs[n].state == AdapterState.ACTIVE]
-        if not active_names:
-            return []
+        assert len(active_names) > 0, "get_samples called without any active adapters"
+
+        datasource_drained = [n for n in self.sources if configs[n].state == AdapterState.DRAINING_DATASOURCE]
 
         per_adapter = num_samples // len(active_names)
         remainder = num_samples % len(active_names)
 
-        # Reused across all samples of a given adapter so they pickle-memoize.
         refs = {name: AdapterRef(name=name, slot=configs[name].slot) for name in active_names}
         reward_specs = {
             name: RewardSpec(rm_type=configs[name].rm_type, custom_rm_path=configs[name].custom_rm_path)
             for name in active_names
         }
 
+        # Get samples from each data source
         all_samples: list[list[Sample]] = []
-        to_deregister: list[str] = []
-
         for i, name in enumerate(active_names):
+            # TODO: remove early source bias from this
             count = per_adapter + (1 if i < remainder else 0)
             if count == 0:
                 continue
@@ -83,13 +84,15 @@ class MultiLoRADataSource(DataSource):
 
             adapter_samples = source.get_samples(count)
 
+            # Begin deregistration process when out of data
             if source.epoch_id > prev_epoch:
                 self.epoch_counts[name] = source.epoch_id
-                max_epochs = config.max_epochs
-                if max_epochs is not None and source.epoch_id >= max_epochs:
-                    logger.info(f"Adapter '{name}' reached max_epochs={max_epochs}, deregistering")
-                    to_deregister.append(name)
+                num_epochs = config.num_epochs
+                if source.epoch_id >= num_epochs:
+                    logger.info(f"Adapter '{name}' reached num_epochs={num_epochs}, deregistering")
+                    datasource_drained.append(name)
 
+            # Add LoRA adapter data + per adapter reward fn data
             ref = refs[name]
             reward_spec = reward_specs[name]
             for group in adapter_samples:
@@ -98,19 +101,22 @@ class MultiLoRADataSource(DataSource):
                     sample.reward_spec = reward_spec
             all_samples.extend(adapter_samples)
 
-        for name in to_deregister:
-            ray.get(self.controller.deregister_adapter.remote(name))
+        if datasource_drained:
+            ray.get(self.controller.update_adapter_state.remote(datasource_drained, AdapterState.DRAINING_INFLIGHT))
 
         return all_samples
 
     def add_samples(self, samples: list[list[Sample]]):
         """Re-queue retried groups; drops groups for non-ACTIVE adapters."""
+        configs = self._fetch_configs()
+        self._reconcile(configs)
+
         for group in samples:
             name = group[0].adapter.name if group and group[0].adapter else None
             if not name or name not in self.sources:
                 continue
-            cfg = self.configs.get(name)
-            if cfg is None or cfg.state != AdapterState.ACTIVE:
+            config = self.configs.get(name)
+            if config is None or config.state != AdapterState.ACTIVE:
                 continue
             self.sources[name].add_samples([group])
 

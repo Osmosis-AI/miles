@@ -55,7 +55,7 @@ SCHEDULE: tuple[Step, ...] = (
 )
 
 
-async def run_schedule(controller, multi_lora_dir: Path) -> None:
+async def run_schedule(controller, multi_lora_dir: Path, shared_state: list[int]) -> None:
     """Drive register/deregister events. Talks only to the controller."""
     for step in SCHEDULE:
         logger.info(f"[schedule] >>> {step.name}")
@@ -66,18 +66,18 @@ async def run_schedule(controller, multi_lora_dir: Path) -> None:
             ray.get(controller.deregister_adapter.remote(name))
             logger.info(f"[schedule] deregistered {name}")
 
-        # Sample the cycle baseline now so wait_cycles counts cycles started
+        # Sample the cycle baseline now so wait_cycles counts cycles completed
         # from this point (the productive cycle handling the deregister, if
         # any, is included).
         cycle_target = None
         if step.wait_cycles > 0:
-            start = await controller.get_last_started_rollout_id.remote()
+            start = shared_state[0]
             cycle_target = start + step.wait_cycles
 
         if step.wait_seconds > 0:
             await asyncio.sleep(step.wait_seconds)
         if cycle_target is not None:
-            while await controller.get_last_started_rollout_id.remote() < cycle_target:
+            while shared_state[0] < cycle_target:
                 await asyncio.sleep(2.0)
 
         # Hard prereq for the next step: any name we just deregistered must
@@ -94,66 +94,83 @@ async def run_schedule(controller, multi_lora_dir: Path) -> None:
     logger.info("[schedule] all steps done; trainer continues to --num-rollout")
 
 
-async def run_trainer(args, controller, rollout_manager, actor_model, num_rollout_per_epoch) -> None:
+async def run_trainer(args, controller, rollout_manager, actor_model, num_rollout_per_epoch, shared_state: list[int]) -> None:
     """Standard multi-LoRA train loop. Identical structure to
     train_multi_lora.py — the dynamic test doesn't change the trainer."""
     if args.offload_rollout:
         await rollout_manager.onload_weights.remote()
+
+    # sync starting weights to sglang
     await actor_model.update_weights()
+
+    if args.check_weight_update_equal:
+        await rollout_manager.check_weights.remote(action="compare")
+
     if args.offload_rollout:
         await rollout_manager.onload_kv.remote()
 
-    rollout_id = args.start_rollout_id
-    while rollout_id < args.num_rollout:
-        n_installed = await actor_model.load_pending_adapters()
-        if n_installed > 0:
-            await actor_model.update_weights()
-
-        configs = await controller.adapter_configs.remote()
-        if AdapterState.ACTIVE not in {c.state for c in configs.values()}:
-            if any(c.state == AdapterState.DRAINED for c in configs.values()):
-                await actor_model.update_weights()
-                await actor_model.unload_drained_adapters(rollout_id)
-            await asyncio.sleep(args.multi_lora_idle_poll_s)
-            continue
-
-        await controller.report_generation_started.remote(rollout_id)
-
-        if args.eval_interval is not None and rollout_id == 0 and not args.skip_eval_before_train:
-            await rollout_manager.eval.remote(rollout_id)
-
-        rollout_data_ref = await rollout_manager.generate.remote(rollout_id)
-
-        if args.offload_rollout:
-            offload_tags = [GPU_MEMORY_TYPE_CUDA_GRAPH]
-            if "kv_cache" in args.offload_rollout_level:
-                offload_tags.append(GPU_MEMORY_TYPE_KV_CACHE)
-            if "weight" in args.offload_rollout_level:
-                offload_tags.append(GPU_MEMORY_TYPE_WEIGHTS)
-            await rollout_manager.offload.remote(tags=offload_tags)
-
-        await actor_model.train(rollout_id, rollout_data_ref)
-
-        if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
-            await actor_model.save_model(rollout_id)
-
+    async def offload_train():
         if args.offload_train:
             await actor_model.offload()
         else:
             await actor_model.clear_memory()
 
-        if args.offload_rollout:
-            await rollout_manager.onload_weights.remote()
-        await actor_model.update_weights()
-        if args.offload_rollout:
-            await rollout_manager.onload_kv.remote()
+    async def save(rollout_id):
+        await actor_model.save_model(
+            rollout_id,
+            force_sync=rollout_id == args.num_rollout - 1,
+        )
+        if args.rollout_global_dataset:
+            await rollout_manager.save.remote(rollout_id)
 
-        await actor_model.unload_drained_adapters(rollout_id)
+    rollout_id = args.start_rollout_id
+    def should_run_train(adapter_configs):
+        valid_states = { AdapterState.ACTIVE, AdapterState.DRAINING_TRAINABLE, AdapterState.DRAINING_INFLIGHT, AdapterState.DRAINING_DATASOURCE }
+        return any(config.state in valid_states for config in adapter_configs)
 
-        if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
-            await rollout_manager.eval.remote(rollout_id)
+    while True:
+        adapter_configs = await controller.adapter_configs.remote()
+        run_train = should_run_train(adapter_configs)
 
-        rollout_id += 1
+        if run_train:
+            rollout_data_ref = await rollout_manager.generate.remote(rollout_id)
+
+            if args.offload_rollout:
+                offload_tags = [GPU_MEMORY_TYPE_CUDA_GRAPH]
+                if "kv_cache" in args.offload_rollout_level:
+                    offload_tags.append(GPU_MEMORY_TYPE_KV_CACHE)
+                if "weight" in args.offload_rollout_level:
+                    offload_tags.append(GPU_MEMORY_TYPE_WEIGHTS)
+                await rollout_manager.offload.remote(tags=offload_tags)
+
+            actor_model.train(rollout_id, rollout_data_ref)
+            if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
+                await save(rollout_id)
+
+            await offload_train()
+            if args.offload_rollout:
+                await rollout_manager.onload_weights.remote()
+            await actor_model.update_weights()
+            if args.offload_rollout:
+                await rollout_manager.onload_kv.remote()
+            rollout_id += 1
+            shared_state[0] = rollout_id
+
+        n_loaded = actor_model.load_pending_adapters(rollout_id)
+        n_unloaded = actor_model.unload_drained_adapters(rollout_id)
+
+        # Finally, update the weights to sglang
+        if n_loaded + n_unloaded > 0 or run_train:
+            await offload_train()
+            actor_model.update_weights()
+
+            if args.offload_rollout:
+                await rollout_manager.onload_weights.remote()
+            await actor_model.update_weights()
+            if args.offload_rollout:
+                await rollout_manager.onload_kv.remote()
+        else:
+            await asyncio.sleep(5)
 
     await rollout_manager.dispose.remote()
 
@@ -166,13 +183,16 @@ async def main(args):
     # No startup registration — the schedule task drives all events.
     controller = create_multi_lora_controller(args.multi_lora_n_adapters, args.lora_rank)
     args.data_source_path = "miles.rollout.multi_lora_data_source.MultiLoRADataSource"
+    args.custom_generate_state_path = "miles.ray.multi_lora_controller.MultiLoRAGenerateState"
 
     rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
-    actor_model, _critic_model = await create_training_models(args, pgs, rollout_manager)
+    actor_model, _ = await create_training_models(args, pgs, rollout_manager)
+
+    shared_state = [args.start_rollout_id]
 
     await asyncio.gather(
-        run_trainer(args, controller, rollout_manager, actor_model, num_rollout_per_epoch),
-        run_schedule(controller, Path(args.multi_lora_dir)),
+        run_trainer(args, controller, rollout_manager, actor_model, num_rollout_per_epoch, shared_state),
+        run_schedule(controller, Path(args.multi_lora_dir), shared_state),
     )
 
 
