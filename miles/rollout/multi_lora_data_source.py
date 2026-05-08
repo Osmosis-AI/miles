@@ -49,7 +49,7 @@ class MultiLoRADataSource(DataSource):
         adapter_args.prompt_data = config.data
         adapter_args.input_key = config.input_key or self.args.input_key
         adapter_args.label_key = config.label_key or self.args.label_key
-        # TODO: metadata key
+        adapter_args.metadata_key = config.metadata_key or self.args.metadata_key
         return RolloutDataSource(adapter_args)
 
     def get_samples(self, num_samples: int) -> list[list[Sample]]:

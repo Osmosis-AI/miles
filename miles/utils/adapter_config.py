@@ -33,20 +33,24 @@ ADAPTER_INACTIVE_STATES = {
 
 @dataclass(frozen=True)
 class AdapterConfig:
-    """Yaml-derived fields plus controller-assigned ``slot`` and ``state``.
-    Frozen so consumers can receive shared copies safely."""
-
     name: str
+
     rank: int
     alpha: int
+
     data: str
     dir: Path = field(default_factory=lambda: Path("."))
+
     input_key: str = "text"
     label_key: str | None = None
+    metadata_key: str | None = None
+
     rm_type: str | None = None
     custom_rm_path: str | None = None
+
     num_epochs: int = 1
     num_rollout: int | None = None
+
     slot: int = -1
     state: AdapterState = AdapterState.PENDING
 
