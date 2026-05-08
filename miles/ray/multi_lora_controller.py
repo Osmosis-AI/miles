@@ -175,7 +175,7 @@ class MultiLoRAController:
             # PENDING implies nothing has happened yet, so we can safely remove
             case AdapterState.PENDING:
                 self.configs[name] = dataclasses.replace(config, state=AdapterState.DRAINED)
-            case bdapterState.ACTIVE:
+            case AdapterState.ACTIVE:
                 self.configs[name] = dataclasses.replace(config, state=AdapterState.DRAINING_DATASOURCE)
             case _:
                 logger.info(f"Adapter '{name}' already in {config.state.name}; ignoring deregister")
