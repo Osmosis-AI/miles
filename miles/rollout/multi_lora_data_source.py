@@ -57,10 +57,13 @@ class MultiLoRADataSource(DataSource):
         self._reconcile(configs)
 
         active_names = [n for n in self.sources if configs[n].state == AdapterState.ACTIVE]
-        assert len(active_names) > 0, "get_samples called without any active adapters"
-
         datasource_drained = [n for n in self.sources if configs[n].state == AdapterState.DRAINING_DATASOURCE]
 
+        assert len(active_names) + len(datasource_drained) > 0, "get_samples called without any active adapters"
+
+        # Run one last iter for those being drained, since sglang rollout needs to be able to run one last
+        # time for the adapter after the draining has kicked off in order to update the adapter states
+        active_names += datasource_drained
         per_adapter = num_samples // len(active_names)
         remainder = num_samples % len(active_names)
 

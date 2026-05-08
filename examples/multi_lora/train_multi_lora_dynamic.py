@@ -26,7 +26,7 @@ from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_
 
 from miles.ray.multi_lora_controller import create_multi_lora_controller
 from miles.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
-from miles.utils.adapter_config import AdapterState, ADAPTER_INACTIVE_STATES
+from miles.utils.adapter_config import AdapterState, ADAPTER_INACTIVE_STATES, ADAPTER_ROLLOUT_STATES
 from miles.utils.arguments import parse_args
 from miles.utils.logging_utils import configure_logger
 from miles.utils.misc import should_run_periodic_action
@@ -136,7 +136,7 @@ async def run_trainer(args, controller, rollout_manager, actor_model, num_rollou
     # Note: in colocated, rollout is inherently tied to train (1 rollout means 1 train) --
     # In async, we should have a run_rollout to gate the rollout.
     def should_run_train(adapter_configs):
-        return any(config.state == AdapterState.ACTIVE for config in adapter_configs.values())
+        return any(config.state in ADAPTER_ROLLOUT_STATES for config in adapter_configs.values())
 
     def should_update_adapters(adapter_configs):
         return any(config.state in ADAPTER_INACTIVE_STATES for config in adapter_configs.values())

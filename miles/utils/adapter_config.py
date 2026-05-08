@@ -16,11 +16,15 @@ class AdapterState(IntEnum):
 
     PENDING = auto()             # registered, awaiting install
     ACTIVE = auto()              # installed, emitting samples
-    DRAINING_DATASOURCE = auto() # data source has been blocked
-    DRAINING_INFLIGHT = auto()   # waiting for all in-flight requests to be drained
-    DRAINING_TRAINABLE = auto()  # waiting for all trainable to be drained
+    DRAINING_DATASOURCE = auto() # data source will emit one last iteration
+    DRAINING_INFLIGHT = auto()   # data source blocked, waiting for all in-flight requests to be drained
+    DRAINING_TRAINABLE = auto()  # inflight samples complete, waiting for all trainable to be drained
     DRAINED = auto()             # all in-flight work trained; ready for cleanup
 
+ADAPTER_ROLLOUT_STATES = {
+    AdapterState.ACTIVE,
+    AdapterState.DRAINING_DATASOURCE,
+}
 # Adapters in this state should not be trained on or have any generated samples
 ADAPTER_INACTIVE_STATES = {
     AdapterState.PENDING,
