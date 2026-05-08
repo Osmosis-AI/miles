@@ -166,6 +166,13 @@ async def run_trainer(args, controller, rollout_manager, actor_model, num_rollou
 
         # Both cases need to push weights
         if run_train or update_adapters:
+            # For run train, at the end, update rollout id and checkpoint if needed
+            if run_train:
+                if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
+                    await save(rollout_id)
+                rollout_id += 1
+                shared_state[0] = rollout_id
+
             # Push the weights to sglang
             await offload_train()
             if args.offload_rollout:
@@ -173,13 +180,6 @@ async def run_trainer(args, controller, rollout_manager, actor_model, num_rollou
             await actor_model.update_weights()
             if args.offload_rollout:
                 await rollout_manager.onload_kv.remote()
-
-            # For run train, at the end, update rollout id and checkpoint if needed
-            if run_train:
-                if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
-                    await save(rollout_id)
-                rollout_id += 1
-                shared_state[0] = rollout_id
         else:
             print("Nothing to do: sleeping for 5s")
             await asyncio.sleep(5)
