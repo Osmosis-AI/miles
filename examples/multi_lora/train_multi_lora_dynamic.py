@@ -46,11 +46,11 @@ class Step:
 
 SCHEDULE: tuple[Step, ...] = (
     Step("idle1",              wait_seconds=30.0),
-    Step("load_dapo",          register=("dapo_math",), wait_cycles=3),
-    Step("load_gsm8k",         register=("gsm8k",),     wait_cycles=3),
-    Step("unload_dapo",        deregister=("dapo_math",), wait_cycles=3),
+    Step("load_dapo",          register=("dapo_math",), wait_cycles=2),
+    Step("load_gsm8k",         register=("gsm8k",),     wait_cycles=2),
+    Step("unload_dapo",        deregister=("dapo_math",), wait_cycles=2),
     Step("unload_gsm8k_idle",  deregister=("gsm8k",),   wait_seconds=30.0),
-    Step("reload_gsm8k",       register=("gsm8k",),     wait_cycles=3),
+    Step("reload_gsm8k",       register=("gsm8k",),     wait_cycles=2),
     Step("reload_dapo_to_end", register=("dapo_math",)),
 )
 
