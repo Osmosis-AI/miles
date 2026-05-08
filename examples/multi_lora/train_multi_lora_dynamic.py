@@ -60,10 +60,10 @@ async def run_schedule(controller, multi_lora_dir: Path, shared_state: list[int]
     for step in SCHEDULE:
         logger.info(f"[schedule] >>> {step.name}")
         for name in step.register:
-            ray.get(controller.register_adapter.remote(str(multi_lora_dir / name)))
+            await controller.register_adapter.remote(str(multi_lora_dir / name))
             logger.info(f"[schedule] registered {name}")
         for name in step.deregister:
-            ray.get(controller.deregister_adapter.remote(name))
+            await controller.deregister_adapter.remote(name)
             logger.info(f"[schedule] deregistered {name}")
 
         # Sample the cycle baseline now so wait_cycles counts cycles completed
