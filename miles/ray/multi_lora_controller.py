@@ -82,6 +82,7 @@ class MultiLoRAGenerateState(GenerateState):
                 if n_inflight == 0:
                     inflight_drained.append(name)
                     del self.in_flight_group_count[name]
+                    # TODO: change to this
                     # self.in_flight_group_count.pop(name, None)
 
         ray.get(controller.update_adapter_state.remote(inflight_drained, AdapterState.DRAINING_TRAINABLE))
@@ -163,6 +164,7 @@ class MultiLoRAController:
             # e.g. prevent transitioning backwards
             assert config.state < state, f"Cannot transition {config.state} to {state}"
 
+            print(f"[adapter state] transitioned {name} from {config.state.name} to {state.name}")
             self.configs[name] = dataclasses.replace(config, state=state)
 
     def deregister_adapter(self, name: str) -> None:
@@ -173,9 +175,9 @@ class MultiLoRAController:
         match config.state:
             # PENDING implies nothing has happened yet, so we can safely remove
             case AdapterState.PENDING:
-                self.configs[name] = dataclasses.replace(config, state=AdapterState.DRAINED)
+                self.update_adapter_state(name, AdapterState.DRAINED)
             case AdapterState.ACTIVE:
-                self.configs[name] = dataclasses.replace(config, state=AdapterState.DRAINING_DATASOURCE)
+                self.update_adapter_state(name, AdapterState.DRAINING_DATASOURCE)
             case _:
                 logger.info(f"Adapter '{name}' already in {config.state.name}; ignoring deregister")
 
@@ -204,7 +206,7 @@ class MultiLoRAController:
             if cur.state != AdapterState.DRAINING_TRAINABLE:
                 continue
             if self.last_trained_rollout_id >= target:
-                self.configs[name] = dataclasses.replace(cur, state=AdapterState.DRAINED)
+                self.update_adapter_state(name, AdapterState.DRAINED)
                 logger.info(f"Adapter '{name}' DRAINED")
 
     def mark_removed(self, name: str) -> int:

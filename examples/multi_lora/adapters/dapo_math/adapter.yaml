@@ -5,3 +5,4 @@ data: /root/dapo-math-17k/dapo-math-17k.jsonl
 input_key: prompt
 label_key: label
 rm_type: deepscaler
+num_rollout: 30
