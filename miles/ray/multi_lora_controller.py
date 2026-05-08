@@ -50,10 +50,7 @@ class MultiLoRAGenerateState(GenerateState):
         self.in_flight_group_count[adapter_name] += 1
 
         def callback(task):
-            failed = task.cancelled() or task.exception() is not None
-            # Decrement by 1 on completion
             self.in_flight_group_count[adapter_name] -= 1
-
             assert self.in_flight_group_count[adapter_name] >= 0, "in-flight group count went below zero, there is an error tracking in-flight groups"
 
         task.add_done_callback(callback)
@@ -85,6 +82,8 @@ class MultiLoRAGenerateState(GenerateState):
                 if n_inflight == 0:
                     inflight_drained.append(name)
                     del self.in_flight_group_count[name]
+                    # self.in_flight_group_count.pop(name, None)
+
         ray.get(controller.update_adapter_state.remote(inflight_drained, AdapterState.DRAINING_TRAINABLE))
 
         # Get updated adapter configs

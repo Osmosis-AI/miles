@@ -73,11 +73,12 @@ class SingletonMeta(type):
         # class even if it has been cached, for getting the type,
         # but the real instance will always be returned
         obj = cls.__new__(cls, *args, **kwargs)
-        if type(obj) not in cls._instances:
+        real_cls = type(obj)
+        if real_cls not in cls._instances:
             obj.__init__(*args, **kwargs)
-            cls._instances[cls] = obj
+            cls._instances[real_cls] = obj
 
-        return cls._instances[cls]
+        return cls._instances[real_cls]
 
     @staticmethod
     def clear_all_instances():
