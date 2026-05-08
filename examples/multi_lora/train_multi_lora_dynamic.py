@@ -26,7 +26,7 @@ from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_
 
 from miles.ray.multi_lora_controller import create_multi_lora_controller
 from miles.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
-from miles.utils.adapter_config import AdapterState, ADAPTER_ACTIVE_STATES, ADAPTER_INACTIVE_STATES
+from miles.utils.adapter_config import AdapterState, ADAPTER_INACTIVE_STATES
 from miles.utils.arguments import parse_args
 from miles.utils.logging_utils import configure_logger
 from miles.utils.misc import should_run_periodic_action
