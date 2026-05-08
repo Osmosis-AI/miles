@@ -11,7 +11,7 @@ import ray
 
 from miles.ray.multi_lora_controller import get_multi_lora_controller
 from miles.rollout.data_source import DataSource, RolloutDataSource
-from miles.utils.adapter_config import AdapterConfig, AdapterState
+from miles.utils.adapter_config import AdapterConfig, AdapterState, ADAPTER_ACTIVE_STATES
 from miles.utils.types import AdapterRef, RewardSpec, Sample
 
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ class MultiLoRADataSource(DataSource):
         configs = self._fetch_configs()
         self._reconcile(configs)
 
-        active_names = [n for n in self.sources if configs[n].state == AdapterState.ACTIVE]
+        active_names = [n for n in self.sources if configs[n].state in ADAPTER_ACTIVE_STATES]
         assert len(active_names) > 0, "get_samples called without any active adapters"
 
         datasource_drained = [n for n in self.sources if configs[n].state == AdapterState.DRAINING_DATASOURCE]

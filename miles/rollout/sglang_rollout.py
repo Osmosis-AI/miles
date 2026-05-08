@@ -143,18 +143,20 @@ class GenerateState(metaclass=SingletonMeta):
     # Lifecycle hooks that can be implemented in custom GenerateState
     # Run on group submit - can be used to add callbacks on completion + update
     # state based on submitted groups
+    # TODO: make this async
     def on_group_submit(self, group: list[Sample], task) -> None:
         ...
 
-    def on_group_selected(self, group: list[Sample] | list[list[Sample]]) -> None:
+    # Run when adding the group to the batch selected for that rollout id
+    async def on_group_selected(self, group: list[Sample] | list[list[Sample]]) -> None:
         ...
 
     # Run at the beginning of generate_rollout_async
-    def on_generate_rollout_start(self, rollout_id: int) -> None:
+    async def on_generate_rollout_start(self, rollout_id: int) -> None:
         ...
 
     # Run at the end of generate_rollout_async
-    def on_generate_rollout_complete(self, rollout_id: int,
+    async def on_generate_rollout_complete(self, rollout_id: int,
        completed_samples: list[list[Sample]] | list[list[list[Sample]]],
        aborted_samples: list[list[Sample]]
     ) -> None:
@@ -431,7 +433,7 @@ async def generate_rollout_async(
     state = GenerateState(args)
 
     # Run generate rollout start lifecycle hook
-    state.on_generate_rollout_start(rollout_id)
+    await state.on_generate_rollout_start(rollout_id)
 
     # instantiate data filters
     dynamic_filter = (
@@ -478,7 +480,7 @@ async def generate_rollout_async(
             # NOTE: here we have not stored all the unused samples back to the data buffer.
             if len(data) < target_data_size:
                 data.append(group)
-                state.on_group_selected(group)
+                await state.on_group_selected(group)
                 pbar.update(args.n_samples_per_prompt)
 
     pbar.close()
@@ -498,7 +500,7 @@ async def generate_rollout_async(
 
     # run generate rollout completion lifecycle hook
     # Note: this is called before sample filtering to allow the hook to see all samples
-    state.on_generate_rollout_complete(rollout_id, data, aborted_samples)
+    await state.on_generate_rollout_complete(rollout_id, data, aborted_samples)
 
     # reset the global state to prevent effects on the next rollout or eval.
     state.reset()

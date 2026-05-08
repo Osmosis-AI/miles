@@ -55,7 +55,7 @@ class MultiLoRAGenerateState(GenerateState):
 
         task.add_done_callback(callback)
 
-    def on_group_selected(self, group: list[Sample] | list[list[Sample]]) -> None:
+    async def on_group_selected(self, group: list[Sample] | list[list[Sample]]) -> None:
         sample = group[0] if isinstance(group[0], Sample) else group[0][0]
 
         assert sample.adapter is not None
@@ -66,13 +66,13 @@ class MultiLoRAGenerateState(GenerateState):
 
         self.trainable_group_count[adapter_name] += 1
 
-    def on_generate_rollout_complete(self,
+    async def on_generate_rollout_complete(self,
         rollout_id: int,
         completed_samples: list[list[Sample]] | list[list[list[Sample]]],
         aborted_samples: list[list[Sample]]) -> None:
 
         controller = get_multi_lora_controller()
-        adapter_configs = ray.get(controller.adapter_configs.remote())
+        adapter_configs = await controller.adapter_configs.remote()
 
         # Update state of those with inflight fully drained
         inflight_drained = []
@@ -83,10 +83,10 @@ class MultiLoRAGenerateState(GenerateState):
                 if n_inflight == 0:
                     inflight_drained.append(name)
 
-        ray.get(controller.update_adapter_state.remote(inflight_drained, AdapterState.DRAINING_TRAINABLE))
+        await controller.update_adapter_state.remote(inflight_drained, AdapterState.DRAINING_TRAINABLE)
 
         # Get updated adapter configs
-        adapter_configs = ray.get(controller.adapter_configs.remote())
+        adapter_configs = await controller.adapter_configs.remote()
 
         # Decrement samples that get processed into a data ref to be trained
         for group in completed_samples:
@@ -107,7 +107,7 @@ class MultiLoRAGenerateState(GenerateState):
             if config.state == AdapterState.DRAINING_TRAINABLE and n_trainable == 0:
                 to_mark.append(adapter_name)
 
-        ray.get(controller.mark_last_training_rollout_id.remote(to_mark, rollout_id))
+        await controller.mark_last_training_rollout_id.remote(to_mark, rollout_id)
 
         # Cleanup
         # TODO: change to this to handle case where immediate deregister
