@@ -74,6 +74,7 @@ class MultiLoRAGenerateState(GenerateState):
         controller = get_multi_lora_controller()
         adapter_configs = ray.get(controller.adapter_configs.remote())
 
+        # Update state of those with inflight fully drained
         inflight_drained = []
         for name, config in adapter_configs.items():
             n_inflight = self.in_flight_group_count.get(name, 0)
@@ -81,9 +82,6 @@ class MultiLoRAGenerateState(GenerateState):
             if config.state == AdapterState.DRAINING_INFLIGHT:
                 if n_inflight == 0:
                     inflight_drained.append(name)
-                    del self.in_flight_group_count[name]
-                    # TODO: change to this to handle case where immediate deregister
-                    # self.in_flight_group_count.pop(name, None)
 
         ray.get(controller.update_adapter_state.remote(inflight_drained, AdapterState.DRAINING_TRAINABLE))
 
@@ -108,9 +106,16 @@ class MultiLoRAGenerateState(GenerateState):
             n_trainable = self.trainable_group_count[adapter_name]
             if config.state == AdapterState.DRAINING_TRAINABLE and n_trainable == 0:
                 to_mark.append(adapter_name)
-                del self.trainable_group_count[adapter_name]
 
         ray.get(controller.mark_last_training_rollout_id.remote(to_mark, rollout_id))
+
+        # Cleanup
+        # TODO: change to this to handle case where immediate deregister
+        # self.in_flight_group_count.pop(name, None)
+        for adapter_name in inflight_drained:
+            del self.in_flight_group_count[adapter_name]
+        for adapter_name in to_mark:
+            del self.trainable_group_count[adapter_name]
 
 
 @ray.remote(num_cpus=0)
