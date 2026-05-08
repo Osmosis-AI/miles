@@ -78,7 +78,7 @@ class MultiLoRAGenerateState(GenerateState):
         adapter_configs = ray.get(controller.adapter_configs.remote())
 
         inflight_drained = []
-        for name, config in adapter_configs:
+        for name, config in adapter_configs.items():
             n_inflight = self.in_flight_group_count.get(name, 0)
 
             if config.state == AdapterState.DRAINING_INFLIGHT:
