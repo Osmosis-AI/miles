@@ -82,7 +82,7 @@ class MultiLoRAGenerateState(GenerateState):
                 if n_inflight == 0:
                     inflight_drained.append(name)
                     del self.in_flight_group_count[name]
-                    # TODO: change to this
+                    # TODO: change to this to handle case where immediate deregister
                     # self.in_flight_group_count.pop(name, None)
 
         ray.get(controller.update_adapter_state.remote(inflight_drained, AdapterState.DRAINING_TRAINABLE))
@@ -90,8 +90,7 @@ class MultiLoRAGenerateState(GenerateState):
         # Get updated adapter configs
         adapter_configs = ray.get(controller.adapter_configs.remote())
 
-        # Track how many groups per adapter are waiting to be trained
-        to_mark = []
+        # Decrement samples that get processed into a data ref to be trained
         for group in completed_samples:
             sample = group[0] if isinstance(group[0], Sample) else group[0][0]
             assert sample.adapter is not None
@@ -102,14 +101,15 @@ class MultiLoRAGenerateState(GenerateState):
             assert self.trainable_group_count[adapter_name] >= 0, "trainable group count went below zero, there is an error tracking trainable groups"
             assert adapter_name in adapter_configs
 
-            # If this is the last group that needs to be trained, update the rollout id on the
-            # multilora controller to indicate this is the last rollout id to be trained before lora deregistration
+        # Update the rollout id on the multilora controller to indicate this is the last rollout id to be trained before lora deregistration for any adapters in draining trainable state and have no more samples left
+        to_mark = []
+        for adapter_name in self.trainable_group_count:
             config = adapter_configs[adapter_name]
             n_trainable = self.trainable_group_count[adapter_name]
             if config.state == AdapterState.DRAINING_TRAINABLE and n_trainable == 0:
                 to_mark.append(adapter_name)
-
                 del self.trainable_group_count[adapter_name]
+
         ray.get(controller.mark_last_training_rollout_id.remote(to_mark, rollout_id))
 
 
