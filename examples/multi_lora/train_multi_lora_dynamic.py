@@ -146,16 +146,15 @@ async def run_trainer(args, controller, rollout_manager, actor_model, num_rollou
         run_train = should_run_train(adapter_configs)
         update_adapters = should_update_adapters(adapter_configs)
 
-        # Start: assume rollout is loaded
+        # Run training
         if run_train:
             rollout_data_ref = await rollout_manager.generate.remote(rollout_id)
             await offload_rollout()
 
             await actor_model.train(rollout_id, rollout_data_ref)
+            await controller.report_training_completed.remote(rollout_id)
 
-            if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
-                await save(rollout_id)
-
+        # Load/unload adapteres
         if update_adapters:
             # Train already offloads the rollout
             if not run_train:
@@ -175,8 +174,10 @@ async def run_trainer(args, controller, rollout_manager, actor_model, num_rollou
             if args.offload_rollout:
                 await rollout_manager.onload_kv.remote()
 
+            # For run train, at the end, update rollout id and checkpoint if needed
             if run_train:
-                await controller.report_training_completed.remote(rollout_id)
+                if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
+                    await save(rollout_id)
                 rollout_id += 1
                 shared_state[0] = rollout_id
         else:
