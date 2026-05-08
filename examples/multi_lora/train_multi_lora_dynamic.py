@@ -132,8 +132,11 @@ async def run_trainer(args, controller, rollout_manager, actor_model, num_rollou
             await rollout_manager.save.remote(rollout_id)
 
     rollout_id = args.start_rollout_id
+
+    # Note: in colocated, rollout is inherently tied to train (1 rollout means 1 train) --
+    # In async, we should have a run_rollout to gate the rollout.
     def should_run_train(adapter_configs):
-        return any(config.state in ADAPTER_ACTIVE_STATES for config in adapter_configs.values())
+        return any(config.state == AdapterState.ACTIVE for config in adapter_configs.values())
 
     def should_update_adapters(adapter_configs):
         return any(config.state in ADAPTER_INACTIVE_STATES for config in adapter_configs.values())

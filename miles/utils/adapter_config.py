@@ -21,15 +21,6 @@ class AdapterState(IntEnum):
     DRAINING_TRAINABLE = auto()  # waiting for all trainable to be drained
     DRAINED = auto()             # all in-flight work trained; ready for cleanup
 
-# Adapters in this state can be trained still
-# ACTIVE can still produce new samples
-ADAPTER_ACTIVE_STATES = {
-    AdapterState.ACTIVE,
-    AdapterState.DRAINING_DATASOURCE,
-    AdapterState.DRAINING_INFLIGHT,
-    AdapterState.DRAINING_TRAINABLE,
-}
-
 # Adapters in this state should not be trained on or have any generated samples
 ADAPTER_INACTIVE_STATES = {
     AdapterState.PENDING,

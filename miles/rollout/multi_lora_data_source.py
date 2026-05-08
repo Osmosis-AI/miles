@@ -56,7 +56,7 @@ class MultiLoRADataSource(DataSource):
         configs = self._fetch_configs()
         self._reconcile(configs)
 
-        active_names = [n for n in self.sources if configs[n].state in ADAPTER_ACTIVE_STATES]
+        active_names = [n for n in self.sources if configs[n].state == AdapterState.ACTIVE]
         assert len(active_names) > 0, "get_samples called without any active adapters"
 
         datasource_drained = [n for n in self.sources if configs[n].state == AdapterState.DRAINING_DATASOURCE]
