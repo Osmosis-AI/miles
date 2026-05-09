@@ -94,6 +94,7 @@ class MultiLoRADataSource(DataSource):
             num_rollout = getattr(config, "num_rollout") or default_num_rollout
             if source.sample_group_index >= num_rollout:
                 logger.info(f"Adapter '{name}' reached num_rollout={num_rollout}, deregistering")
+                print(f"Adapter '{name}' reached num_rollout={num_rollout}, deregistering...")
                 datasource_drained.append(name)
 
             # Add LoRA adapter data + per adapter reward fn data
