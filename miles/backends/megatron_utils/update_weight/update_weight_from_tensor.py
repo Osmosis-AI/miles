@@ -200,14 +200,13 @@ class UpdateWeightFromTensor:
 
         # For LoRA+distributed: base weights are frozen, skip after first round.
         if not (self.is_lora and self.use_distribute and self._lora_base_synced):
-            # Multi-LoRA: hide adapters so the bridge's conversion-task walk doesn't
-            # crash on the unfamiliar `adapters[*]` ModuleList structure.
+            base_ctx = nullcontext()
             if self.is_multi_lora:
+                # For multi_lora, hide the multi-adapter layer entirely so it doesn't
+                # intefere with the hf_weight_iterator
                 from megatron.bridge.peft.multi_lora_layers import hide_adapters
-
                 base_ctx = hide_adapters(self.model)
-            else:
-                base_ctx = nullcontext()
+
             with base_ctx:
                 for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
                     megatron_local_weights, weight_type="base"
