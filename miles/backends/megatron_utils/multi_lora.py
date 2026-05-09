@@ -190,14 +190,12 @@ def find_latest_checkpoint(ckpt_dir: Path) -> Path | None:
 def zero_optimizer_state_for_adapter(optimizer, model, idx: int) -> None:
     from megatron.bridge.peft.multi_lora_layers import (
         MultiLoRALinear,
-        SimpleMultiLoRALinear,
         _iter_multi_lora_modules,
     )
 
     target_main_params = set()
     for module in _iter_multi_lora_modules(model):
-        # TODO: remove SimpleMultiLoRALinear
-        if not isinstance(module, (MultiLoRALinear, SimpleMultiLoRALinear)):
+        if not isinstance(module, MultiLoRALinear):
             continue
         adapter = module.adapters[idx]
         for param in adapter.parameters():
