@@ -88,16 +88,13 @@ class MultiLoRADataSource(DataSource):
             adapter_samples = source.get_samples(count)
 
             # Begin deregistration process when out of data
-            if source.epoch_id > prev_epoch:
-                self.epoch_counts[name] = source.epoch_id
-                # Convert epoch to rollout
-                default_num_rollout = getattr(config, "num_epochs", 1) * len(source.dataset)
-                num_rollout = config.num_rollout or default_num_rollout
-
-                # sample_group_index is the same as tracking the row index
-                if source.sample_group_index >= num_rollout:
-                    logger.info(f"Adapter '{name}' reached num_rollout={num_rollout}, deregistering")
-                    datasource_drained.append(name)
+            # sample_group_index is the same as tracking the row index
+            # Default to length of dataset, override if num rollout is set
+            default_num_rollout = getattr(config, "num_epochs", 1) * len(source.dataset)
+            num_rollout = getattr(config, "num_rollout") or default_num_rollout
+            if source.sample_group_index >= num_rollout:
+                logger.info(f"Adapter '{name}' reached num_rollout={num_rollout}, deregistering")
+                datasource_drained.append(name)
 
             # Add LoRA adapter data + per adapter reward fn data
             ref = refs[name]
