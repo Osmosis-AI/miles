@@ -48,7 +48,7 @@ class AdapterConfig:
     rm_type: str | None = None
     custom_rm_path: str | None = None
 
-    num_epochs: int = 1
+    num_epochs: int | None = None
     num_rollout: int | None = None
 
     slot: int = -1
