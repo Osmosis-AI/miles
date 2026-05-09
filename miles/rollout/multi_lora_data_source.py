@@ -90,7 +90,7 @@ class MultiLoRADataSource(DataSource):
             # Begin deregistration process when out of data
             # sample_group_index is the same as tracking the row index
             # Default to length of dataset, override if num rollout is set
-            default_num_rollout = getattr(config, "num_epochs", 1) * len(source.dataset)
+            default_num_rollout = (getattr(config, "num_epochs", 1) or 1) * len(source.dataset)
             num_rollout = getattr(config, "num_rollout") or default_num_rollout
             if source.sample_group_index >= num_rollout:
                 logger.info(f"Adapter '{name}' reached num_rollout={num_rollout}, deregistering")
