@@ -68,7 +68,9 @@ def parse_adapter_yaml(path: Path) -> AdapterConfig:
         dir=path.parent,
         input_key=raw.get("input_key", "text"),
         label_key=raw.get("label_key"),
+        metadata_key=raw.get("metadata_key"),
         rm_type=raw.get("rm_type"),
         custom_rm_path=raw.get("custom_rm_path"),
         num_epochs=raw.get("num_epochs"),
+        num_rollout=raw.get("num_rollout"),
     )

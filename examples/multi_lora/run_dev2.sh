@@ -53,7 +53,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    --label-key label \
    --apply-chat-template \
    --rollout-shuffle \
-   --num-rollout 18 \
+   --num-rollout 50 \
    --rollout-batch-size 32 \
    --n-samples-per-prompt 8 \
    --rollout-max-response-len 4096 \
