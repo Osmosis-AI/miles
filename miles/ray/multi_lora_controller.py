@@ -110,12 +110,14 @@ class MultiLoRAGenerateState(GenerateState):
         await controller.mark_last_training_rollout_id.remote(to_mark, rollout_id)
 
         # Cleanup
-        # TODO: change to this to handle case where immediate deregister
-        # self.in_flight_group_count.pop(name, None)
         for adapter_name in inflight_drained:
-            del self.in_flight_group_count[adapter_name]
+            res = self.in_flight_group_count.pop(adapter_name, None)
+            if not res:
+                logger.warn(f"{adapter_name} was removed from in_flight without any in-flight samples, this indicates that either adapter was removed before generating any samples or an underlying inflight counting error")
         for adapter_name in to_mark:
-            del self.trainable_group_count[adapter_name]
+            res = self.trainable_group_count.pop(adapter_name, None)
+            if not res:
+                logger.warn(f"{adapter_name} was removed from trainable group count without any in-flight samples, this indicates that either adapter was removed before generating any samples or an underlying trainable group counting error")
 
 
 @ray.remote(num_cpus=0)
