@@ -99,16 +99,14 @@ def save_multi_lora_checkpoints(
                 for hf_name, weight, _megatron_name in bridge.export_adapter_weights(
                     model, cpu=True, show_progress=False,
                 ):
-                    # TODO: check if this is really needed
                     # ``.contiguous().clone()`` is needed because the bridge expands
                     # one Megatron fused-linear adapter into multiple HF keys that
                     # share storage — the single ``linear_qkv.adapter.linear_in``
                     # surfaces as ``{q,k,v}_proj.lora_A`` all aliasing the same
                     # tensor, and ``linear_fc1`` similarly produces aliased
                     # ``{gate,up}_proj.lora_A``. ``safetensors.save_file`` refuses
-                    # aliased tensors, and HF PEFT consumers expect independent
-                    # per-projection copies regardless.
-                    hf_state[hf_name] = weight.contiguous().clone()
+                    # aliased tensors
+                    hf_state[hf_name] = weight.clone()
 
         if is_global_writer:
             save_safetensors(
