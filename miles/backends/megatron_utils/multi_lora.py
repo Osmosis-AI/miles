@@ -1,12 +1,3 @@
-"""Multi-LoRA model setup and helpers for Megatron backend.
-
-This module handles:
-- Creating and configuring MultiLoRA instances
-- Setting up the model with multi-adapter layers via megatron-bridge
-- A wrapper around initialize_model_and_optimizer that also returns the MultiLoRA instance
-- Optimizer state zeroing for adapter swap (future dynamic case)
-"""
-
 import dataclasses
 import logging
 from argparse import Namespace

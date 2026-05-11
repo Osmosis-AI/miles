@@ -1,23 +1,3 @@
-"""Multi-LoRA model-side orchestration.
-
-Two lifecycle hooks the train script calls each cycle, both *model-side only*:
-
-- ``load_pending_adapters``  : PENDING -> ACTIVE (init slot + load ckpt)
-- ``unload_drained_adapters``: DRAINED -> REMOVED (save + clear slot + zero opt)
-
-Every SGLang interaction (push for ACTIVE, unload for DRAINED) lives inside
-``UpdateWeightFromTensor._send_multi_lora_params`` so it free-rides on the
-existing pause / flush / continue bracket of ``update_weights()`` — no new
-bracket logic anywhere.
-
-Plus checkpoint helpers (``save_multi_lora_checkpoints``, ``slice_lora_to_rank``).
-
-TODO(perf): re-sync only adapters trained this step. ``_send_multi_lora_params``
-currently re-IPCs every ACTIVE adapter every call, even when its weights are
-unchanged. The hint already exists in ``rollout_data["adapter_slots"]``;
-plumbing it through is deferred — see chat 2026-04-28.
-"""
-
 import json
 import logging
 import os
@@ -66,21 +46,6 @@ def save_multi_lora_checkpoints(
         ├── adapter_megatron_tp{tp}_pp{pp}.pt   ← per-rank shard, fast resume
         ├── adapter_model.safetensors           ← gathered HF, inference / external
         └── adapter_config.json                 ← HF PEFT metadata (r, alpha, ...)
-
-    The Megatron shard preserves the local TP/PP layout: each (tp, pp) tile
-    writes its own file with Megatron-native parameter names, copied straight
-    from the slot's ``ParallelLinearAdapter`` weights with no gather/scatter.
-    Only one DP replica per tile writes (the others would write identical
-    bytes). Resume is then a trivial ``param.data.copy_`` per tensor.
-
-    The HF safetensors is TP-gathered by the bridge (collective across all
-    ranks), then written by a single rank in standard PEFT layout so external
-    tools (HuggingFace ``peft``, SGLang, vLLM) can consume it directly.
-
-    Atomicity follows the single-LoRA pattern: ``dist.barrier()`` between
-    sections so partial writes from a faster rank don't race with the next
-    operation, plus ``os.sync()`` after the HF write to flush dirty pages
-    before the function returns.
     """
     from megatron.bridge import AutoBridge
     from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
@@ -101,13 +66,9 @@ def save_multi_lora_checkpoints(
         else ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     )
 
-    # Build the bridge once and reuse across every adapter — saves N-1
-    # ``AutoBridge.from_hf_pretrained`` invocations for N adapters.
     bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)
 
     for adapter_name, config in adapter_configs.items():
-        # Per-adapter prefix so Ray's log dedupe (which collapses identical
-        # repeated messages) keeps these distinct across adapters.
         log_prefix = f"[multilora] ({adapter_name})"
 
         final_dir = config.dir / "checkpoints" / f"step_{iteration}"
@@ -118,7 +79,7 @@ def save_multi_lora_checkpoints(
             dist.barrier()
 
         with expose_adapter_slot(model, config.slot):
-            # ---- (1) Megatron-native per-rank shard (fast resume) ----
+            # Megatron checkpoints
             if is_dp_rank_0:
                 shard: dict[str, torch.Tensor] = {
                     name: param.data.cpu()
@@ -133,23 +94,20 @@ def save_multi_lora_checkpoints(
                     f"({len(shard)} tensors) to {native_path}"
                 )
 
-            # ---- (2) HF PEFT format (TP-gathered, single file) ----
-            # Bridge export is collective: every TP rank participates in the
-            # all-gather. Only the global writer materialises the file.
-            #
-            # ``.contiguous().clone()`` is needed because the bridge expands
-            # one Megatron fused-linear adapter into multiple HF keys that
-            # share storage — the single ``linear_qkv.adapter.linear_in``
-            # surfaces as ``{q,k,v}_proj.lora_A`` all aliasing the same
-            # tensor, and ``linear_fc1`` similarly produces aliased
-            # ``{gate,up}_proj.lora_A``. ``safetensors.save_file`` refuses
-            # aliased tensors, and HF PEFT consumers expect independent
-            # per-projection copies regardless.
             hf_state: dict[str, torch.Tensor] = {}
             with megatron_bridge_utils.patch_megatron_model(model):
                 for hf_name, weight, _megatron_name in bridge.export_adapter_weights(
                     model, cpu=True, show_progress=False,
                 ):
+                    # TODO: check if this is really needed
+                    # ``.contiguous().clone()`` is needed because the bridge expands
+                    # one Megatron fused-linear adapter into multiple HF keys that
+                    # share storage — the single ``linear_qkv.adapter.linear_in``
+                    # surfaces as ``{q,k,v}_proj.lora_A`` all aliasing the same
+                    # tensor, and ``linear_fc1`` similarly produces aliased
+                    # ``{gate,up}_proj.lora_A``. ``safetensors.save_file`` refuses
+                    # aliased tensors, and HF PEFT consumers expect independent
+                    # per-projection copies regardless.
                     hf_state[hf_name] = weight.contiguous().clone()
 
         if is_global_writer:
@@ -175,13 +133,11 @@ def save_multi_lora_checkpoints(
                 f"({len(hf_state)} tensors)"
             )
 
-        # Wait for every rank to finish writing its part, then a single rank
-        # promotes the temp dir to its final name. ``os.replace`` is atomic on
-        # the same filesystem, but Linux ``rename(2)`` refuses to overwrite a
-        # non-empty target dir, so we ``rmtree`` any pre-existing ``step_N``
-        # first (only happens on re-saves at the same iteration).
         if dist.is_initialized():
             dist.barrier()
+
+        # to avoid partially complete checkpoints, move the checkpoint to the
+        # actual directory after everything is complete
         if is_global_writer:
             if final_dir.exists():
                 import shutil
@@ -194,18 +150,6 @@ def save_multi_lora_checkpoints(
 
 def _register_adapter(name: str, config: AdapterConfig, model) -> None:
     """Install one PENDING adapter on this rank's local model shard.
-
-    Loads the latest cross-rank-complete checkpoint into the slot (or leaves
-    construction-time values if none), then runs ``init_adapter_slot`` to
-    bind ``rank``/``alpha`` and apply the rank mask. Pure local model
-    mutation — the controller transition to ACTIVE is done by the caller
-    after every rank has finished installing (see ``load_pending_adapters``).
-
-    ``init_adapter_slot`` runs *after* ``load_adapter`` on purpose: the rank
-    mask must be the source of truth for padded rows/cols. Saved shards
-    can carry non-zero padded values (older code paths, mid-run rank
-    changes, copy-pasted checkpoints) and silently breaking
-    ``slice_lora_to_rank`` later is much worse than re-zeroing here.
     """
     from megatron.bridge.peft.multi_lora_layers import init_adapter_slot, load_adapter
 
@@ -232,13 +176,6 @@ def _register_adapter(name: str, config: AdapterConfig, model) -> None:
 
 def _deregister_adapter(name: str, config: AdapterConfig, rollout_id: int, args, model, optimizer) -> None:
     """Model-side cleanup for one DRAINED adapter.
-
-    SGLang unload happens earlier inside ``_send_multi_lora_params`` (which
-    runs in the pause bracket of ``update_weights()``). This function only
-    touches local trainer state: save final ckpt → clear slot → zero
-    optimizer state. The controller transition to REMOVED is done by the
-    caller after every rank has finished cleanup (see
-    ``unload_drained_adapters``).
     """
     from megatron.bridge.peft.multi_lora_layers import clear_adapter_slot
 
@@ -246,12 +183,16 @@ def _deregister_adapter(name: str, config: AdapterConfig, rollout_id: int, args,
 
     log_prefix = f"[multilora] ({name})"
 
+    # Save the checkpoint
     save_multi_lora_checkpoints(args, model, rollout_id, {name: config})
     logger.info(f"{log_prefix} saved final checkpoint")
 
+    # Clear out the multilora slot in the multilora layer in the Megatron model
     clear_adapter_slot(model, config.slot)
     logger.info(f"{log_prefix} cleared adapter slot {config.slot}")
 
+    # Zero out the optimizer state to prevent future adapters from reusing previous adapter
+    # momentum, etc
     zero_optimizer_state_for_adapter(optimizer, model, config.slot)
     optimizer.reload_model_params()
     logger.info(f"{log_prefix} cleared optimizer state for slot {config.slot}")
@@ -287,17 +228,7 @@ def load_pending_adapters(args, model, optimizer) -> int:
 
 
 def unload_drained_adapters(args, model, optimizer, rollout_id: int) -> int:
-    """DRAINED -> REMOVED model-side cleanup. Returns count for the caller's
-    backuper-refresh decision.
-
-    Caller must have already run ``update_weights()`` after the adapter went
-    DRAINED so SGLang has unloaded it; otherwise SGLang holds a reference to
-    a slot we're about to clear.
-
-    Race-safety: same pattern as ``load_pending_adapters``. Two gloo
-    barriers sandwich the local cleanup so every rank sees the same DRAINED
-    set and every rank finishes cleanup before main rank flips the
-    controller to REMOVED.
+    """DRAINED adapters model-side cleanup.
     """
     from miles.backends.megatron_utils.initialize import is_megatron_main_rank
     from miles.utils.adapter_config import AdapterState

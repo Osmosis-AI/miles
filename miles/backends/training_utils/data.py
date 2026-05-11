@@ -196,7 +196,6 @@ def get_batch(
     # without respecting sample boundaries, which breaks MultiLoRA's adapter routing.
     adapter_slots = batch.get("adapter_slots")
     if adapter_slots is not None:
-        # TODO: remove once dynamic batch size + multi-LoRA ordering is validated
         assert all(adapter_slots[i] <= adapter_slots[i+1] for i in range(len(adapter_slots)-1)), (
             f"adapter_slots not sorted in micro-batch: {adapter_slots}"
         )
