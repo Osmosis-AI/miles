@@ -48,8 +48,8 @@ class AdapterConfig:
     rm_type: str | None = None
     custom_rm_path: str | None = None
 
-    num_epochs: int | None = None
-    num_rollout: int | None = None
+    num_epoch: int | None = None
+    num_row: int | None = None
 
     slot: int = -1
     state: AdapterState = AdapterState.PENDING
@@ -71,6 +71,6 @@ def parse_adapter_yaml(path: Path) -> AdapterConfig:
         metadata_key=raw.get("metadata_key"),
         rm_type=raw.get("rm_type"),
         custom_rm_path=raw.get("custom_rm_path"),
-        num_epochs=raw.get("num_epochs"),
-        num_rollout=raw.get("num_rollout"),
+        num_epoch=raw.get("num_epoch"),
+        num_row=raw.get("num_row"),
     )

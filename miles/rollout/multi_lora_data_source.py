@@ -1,5 +1,5 @@
 """Multi-LoRA data source: round-robins ``get_samples`` across ACTIVE
-adapters only. Reaching ``num_epochs`` triggers ``deregister_adapter``;
+adapters only. Reaching ``num_epoch`` triggers ``deregister_adapter``;
 the trainer's lifecycle gate drives the rest of the state machine.
 """
 
@@ -90,11 +90,11 @@ class MultiLoRADataSource(DataSource):
             # Begin deregistration process when out of data
             # sample_group_index is the same as tracking the row index
             # Default to length of dataset, override if num rollout is set
-            default_num_rollout = (getattr(config, "num_epochs", 1) or 1) * len(source.dataset)
-            num_rollout = getattr(config, "num_rollout") or default_num_rollout
-            if source.sample_group_index >= num_rollout:
-                logger.info(f"Adapter '{name}' reached num_rollout={num_rollout}, deregistering")
-                print(f"Adapter '{name}' reached num_rollout={num_rollout}, deregistering...")
+            default_num_row = (getattr(config, "num_epoch", 1) or 1) * len(source.dataset)
+            num_row = getattr(config, "num_row") or default_num_row
+            if source.sample_group_index >= num_row:
+                logger.info(f"Adapter '{name}' reached num_row={num_row}, deregistering")
+                print(f"Adapter '{name}' reached num_row={num_row}, deregistering...")
                 datasource_drained.append(name)
 
             # Add LoRA adapter data + per adapter reward fn data
