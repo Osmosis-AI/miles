@@ -13,6 +13,7 @@ set -ex
 export GPUS_PER_NODE=8
 
 pkill sglang || true
+ray stop --force || true
 sleep 3
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
@@ -41,7 +42,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    --lora-rank 32 \
    --lora-alpha 32 \
    --lora-dropout 0.0 \
-   --target-modules "o_proj" \
+   --target-modules "q_proj,k_proj,v_proj" \
    --multi-lora-dir "${SCRIPT_DIR}/adapters" \
    --multi-lora-n-adapters 2 \
    --multi-lora-idle-poll-s 5 \
@@ -87,6 +88,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    --max-tokens-per-gpu 9216 \
    \
    --rollout-num-gpus-per-engine 8 \
+   --sglang-tp-size 1 \
    --sglang-ep-size 8 \
    --sglang-mem-fraction-static 0.4 \
    \
@@ -95,6 +97,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    --accumulate-allreduce-grads-in-fp32 \
    --attention-softmax-in-fp32 \
    --attention-backend flash \
+   --sglang-disable-cuda-graph \
    \
    --use-wandb \
    --wandb-host https://wandb.ai/ \
