@@ -16,7 +16,7 @@ def create_multi_lora(args: Namespace):
     """Create a MultiLoRA instance from training args."""
     from megatron.bridge.peft.multi_lora import MultiLoRA
 
-    from miles.backends.megatron_utils.lora_utils import convert_target_modules_to_megatron
+    from miles.backends.megatron_utils.lora_utils import convert_target_modules_to_megatron, exclude_mtp_vision_modules
 
     lora_type_name = getattr(args, "lora_type", "lora").lower()
     if lora_type_name == "canonical_lora":
@@ -26,8 +26,12 @@ def create_multi_lora(args: Namespace):
         from megatron.bridge.peft.lora import LoRA
         lora_cls = LoRA
 
+    target_modules = convert_target_modules_to_megatron(args.target_modules, lora_type=lora_cls)
+    if "Qwen3.5" in args.hf_checkpoint:
+        target_modules = exclude_mtp_vision_modules(target_modules)
+
     return MultiLoRA(
-        target_modules=convert_target_modules_to_megatron(args.target_modules, lora_type=lora_cls),
+        target_modules=target_modules,
         n_adapters=args.multi_lora_n_adapters,
         dim=args.lora_rank,
         alpha=args.lora_alpha,

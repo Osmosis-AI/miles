@@ -46,7 +46,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    --multi-lora-dir "${SCRIPT_DIR}/adapters" \
    --multi-lora-n-adapters 2 \
    --multi-lora-idle-poll-s 5 \
-   --sglang-lora-backend triton \
+   --sglang-lora-backend csgmv \
    --sglang-disable-cuda-graph \
    \
    --prompt-data /root/gsm8k/train.parquet \
@@ -78,7 +78,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    --adam-beta1 0.9 \
    --adam-beta2 0.98 \
    \
-   --tensor-model-parallel-size 2 \
+   --tensor-model-parallel-size 1 \
    --sequence-parallel \
    --pipeline-model-parallel-size 1 \
    --context-parallel-size 1 \
@@ -97,7 +97,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    --accumulate-allreduce-grads-in-fp32 \
    --attention-softmax-in-fp32 \
    --attention-backend flash \
-   --sglang-disable-cuda-graph \
+   --sglang-disable-cuda-graph-padding \
    \
    --use-wandb \
    --wandb-host https://wandb.ai/ \
