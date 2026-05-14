@@ -31,7 +31,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    -- python3 examples/multi_lora/train_multi_lora_static.py \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 4 \
-   --rollout-num-gpus-per-node 4 \
+   --rollout-num-gpus 4 \
    --calculate-per-token-loss \
    --use-miles-router \
    ${MODEL_ARGS[@]} \
