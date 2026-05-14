@@ -42,12 +42,12 @@ ray job submit --address="http://127.0.0.1:8265" \
    --lora-rank 32 \
    --lora-alpha 32 \
    --lora-dropout 0.0 \
-   --target-modules "q_proj,k_proj,v_proj" \
+   --target-modules "q_proj,k_proj,v_proj,o_proj" \
    --multi-lora-dir "${SCRIPT_DIR}/adapters" \
    --multi-lora-n-adapters 2 \
    --multi-lora-idle-poll-s 5 \
-   --sglang-lora-backend csgmv \
-   --sglang-disable-cuda-graph \
+   --sglang-lora-backend triton \
+   --sglang-disable-cuda-graph-padding \
    \
    --prompt-data /root/gsm8k/train.parquet \
    --input-key messages \
@@ -79,12 +79,11 @@ ray job submit --address="http://127.0.0.1:8265" \
    --adam-beta2 0.98 \
    \
    --tensor-model-parallel-size 1 \
-   --sequence-parallel \
    --pipeline-model-parallel-size 1 \
    --context-parallel-size 1 \
    --expert-model-parallel-size 8 \
    --expert-tensor-parallel-size 1 \
-   --use-dynamic-batch-size \
+   --micro-batch-size 1 \
    --max-tokens-per-gpu 9216 \
    \
    --rollout-num-gpus-per-engine 8 \
