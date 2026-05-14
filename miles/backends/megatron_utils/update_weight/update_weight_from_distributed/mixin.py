@@ -1,17 +1,27 @@
-from collections.abc import Callable
+from argparse import Namespace
+from collections.abc import Callable, Sequence
 
 import ray
 import torch
 import torch.distributed as dist
 from megatron.core import mpu
+from ray import ObjectRef
 
 from tqdm import tqdm
 
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.timer import timer
 
+from ...lora_utils import LORA_ADAPTER_NAME, _is_adapter_param_name, build_lora_sync_config, is_lora_weight_name
 from ...megatron_to_hf import convert_to_hf
-from ..common import all_gather_param, collect_named_tensors_for_weight_transfer, post_process_weights
+from ...sglang import FlattenedTensorBucket, MultiprocessingSerializer
+from ..common import (
+    _check_weight_sync_results,
+    all_gather_param,
+    collect_named_tensors_for_weight_transfer,
+    post_process_weights,
+)
+from ..hf_weight_iterator_base import HfWeightIteratorBase
 
 
 class DistBucketedWeightUpdateMixin:
@@ -32,6 +42,34 @@ class DistBucketedWeightUpdateMixin:
             engines (via NCCL broadcast, p2p write, etc.).
     """
 
+    def _init_lora(
+        self,
+        *,
+        args: Namespace,
+        model: Sequence[torch.nn.Module],
+        model_name: str,
+        quantization_config: dict | None,
+        is_lora: bool,
+        is_multi_lora: bool = False,
+    ) -> None:
+        """Initialize LoRA state for distributed weight updaters."""
+        self.is_lora = is_lora
+        self.is_multi_lora = is_multi_lora
+        self._lora_loaded = False
+        self._lora_base_synced = False
+        self._multi_lora_loaded: set[str] = set()
+
+        if self.is_lora or self.is_multi_lora:
+            self._hf_weight_iterator = HfWeightIteratorBase.create(
+                args=args,
+                model=model,
+                model_name=model_name,
+                quantization_config=quantization_config,
+                is_lora=True,
+            )
+            if self.is_lora and not self.is_multi_lora:
+                self._lora_config = build_lora_sync_config(args)
+
     def _gather_and_update_non_expert_weights(
         self,
         update_bucket_weight_func: Callable[[list[tuple[str, torch.Tensor]], tqdm | None], None],
@@ -47,6 +85,11 @@ class DistBucketedWeightUpdateMixin:
         converted_named_tensors: list[tuple[str, torch.Tensor]] = []
 
         for name, param in collect_named_tensors_for_weight_transfer(self.args, self.model, is_expert=False):
+            if (getattr(self, "is_lora", False) or getattr(self, "is_multi_lora", False)) and _is_adapter_param_name(
+                name
+            ):
+                continue
+            name = name.replace(".to_wrap.", ".")
             param = all_gather_param(self.args, name, param)
             if not self._is_source:
                 continue
@@ -76,6 +119,11 @@ class DistBucketedWeightUpdateMixin:
         named_tensors: list[tuple[str, torch.Tensor]] = []
 
         for name, param in collect_named_tensors_for_weight_transfer(self.args, self.model, is_expert=True):
+            if (getattr(self, "is_lora", False) or getattr(self, "is_multi_lora", False)) and _is_adapter_param_name(
+                name
+            ):
+                continue
+            name = name.replace(".to_wrap.", ".")
             param = all_gather_param(self.args, name, param)
             param_size = param.numel() * param.element_size()
             if (
@@ -142,8 +190,7 @@ class DistBucketedWeightUpdateMixin:
         if dist.get_rank() == 0:
             mode = self.args.pause_generation_mode
             ray.get([engine.pause_generation.remote(mode=mode) for engine in self.rollout_engines])
-            if mode not in ("in_place"):
-                ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+            ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
 
             # int4/fp4 pre_process
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
@@ -170,15 +217,9 @@ class DistBucketedWeightUpdateMixin:
     @torch.no_grad()
     def update_weights(self) -> None:
         """Orchestrate the full weight-update lifecycle.
-        Pause → flush → non-expert (TP) → expert (EP) → continue.
-        Progress is showed on the rank `_is_source`.
 
-        - `_pause_and_prepare_engines`: pause rollout engines, flush caches,
-             run pre-process.
-        - `_gather_and_update_non_expert_weights`
-        - `_gather_and_update_expert_weights`
-        - `_finalize_and_resume_engines`: run post-process, resume rollout
-            generation.
+        Non-LoRA: pause → base non-expert (TP) → base expert (EP) → resume.
+        LoRA: pause → base weights once → adapter weights every call → resume.
         """
         self.weight_version += 1
 
@@ -186,13 +227,146 @@ class DistBucketedWeightUpdateMixin:
         dist.barrier(group=get_gloo_group())
 
         with timer("update_weights_implementation"):
-            pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0) if self._is_source else None
+            adapter_enabled = getattr(self, "is_lora", False) or getattr(self, "is_multi_lora", False)
+            base_was_synced = getattr(self, "_lora_base_synced", False)
+            if not (adapter_enabled and base_was_synced):
+                pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0) if self._is_source else None
 
-            self._gather_and_update_non_expert_weights(self._update_weight_implementation, pbar)
-            dist.barrier(group=get_gloo_group())
-            self._gather_and_update_expert_weights(self._update_weight_implementation, pbar)
-            dist.barrier(group=get_gloo_group())
+                self._gather_and_update_non_expert_weights(self._update_weight_implementation, pbar)
+                dist.barrier(group=get_gloo_group())
+                self._gather_and_update_expert_weights(self._update_weight_implementation, pbar)
+                dist.barrier(group=get_gloo_group())
+
+            if getattr(self, "is_multi_lora", False):
+                self._sync_multi_lora_weights()
+                dist.barrier(group=get_gloo_group())
+            elif getattr(self, "is_lora", False):
+                self._sync_lora_weights()
+                dist.barrier(group=get_gloo_group())
+
+            if adapter_enabled and not base_was_synced:
+                self._lora_base_synced = True
 
         with timer("finalize_and_resume_engines"):
             self._finalize_and_resume_engines()
             dist.barrier(group=get_gloo_group())
+
+    def _sync_lora_weights(self) -> None:
+        """Sync a single LoRA adapter to rollout engines via Ray tensor RPCs."""
+        all_refs: list[ObjectRef] = []
+        lora_chunk_count = 0
+
+        if self._is_source and self._lora_loaded:
+            ray.get([engine.unload_lora_adapter.remote(lora_name=LORA_ADAPTER_NAME) for engine in self.rollout_engines])
+
+        for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks({}, weight_type="lora"):
+            weight_tensors = [(n, t) for n, t in hf_named_tensors if is_lora_weight_name(n)]
+            if not weight_tensors:
+                continue
+            lora_chunk_count += 1
+
+            if self._is_source:
+                all_refs.extend(
+                    self._load_lora_adapter_from_tensors(
+                        adapter_name=LORA_ADAPTER_NAME,
+                        lora_config=self._lora_config,
+                        weight_tensors=weight_tensors,
+                    )
+                )
+
+        if lora_chunk_count == 0:
+            raise RuntimeError(
+                "LoRA weight sync failed: the weight iterator produced zero chunks. "
+                "No adapter weights were sent to the rollout engine. This usually means "
+                "the Megatron-Bridge or SGLang version is incompatible."
+            )
+
+        if all_refs:
+            _check_weight_sync_results(ray.get(all_refs), is_lora=True)
+        if self._is_source:
+            self._lora_loaded = True
+
+    def _sync_multi_lora_weights(self) -> None:
+        """Sync every active multi-LoRA adapter and unload drained adapters."""
+        from miles.ray.multi_lora_controller import get_multi_lora_controller
+        from miles.utils.adapter_config import AdapterState
+
+        configs = ray.get(get_multi_lora_controller().adapter_configs.remote())
+        for name, config in configs.items():
+            if config.state == AdapterState.ACTIVE:
+                self._sync_one_multi_lora_adapter(name, config, lora_loaded=name in self._multi_lora_loaded)
+                self._multi_lora_loaded.add(name)
+            elif config.state == AdapterState.DRAINED and name in self._multi_lora_loaded:
+                if self._is_source:
+                    ray.get([engine.unload_lora_adapter.remote(lora_name=name) for engine in self.rollout_engines])
+                self._multi_lora_loaded.discard(name)
+
+    def _sync_one_multi_lora_adapter(self, adapter_name: str, config, lora_loaded: bool) -> None:
+        """Push one named adapter to all rollout engines."""
+        from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
+
+        from ..multi_lora_sync import slice_lora_to_rank
+
+        lora_config = build_lora_sync_config(self.args)
+        lora_config["r"] = config.rank
+        lora_config["lora_alpha"] = config.alpha
+
+        all_refs: list[ObjectRef] = []
+        lora_chunk_count = 0
+
+        if self._is_source and lora_loaded:
+            ray.get([engine.unload_lora_adapter.remote(lora_name=adapter_name) for engine in self.rollout_engines])
+
+        with expose_adapter_slot(self.model, config.slot):
+            for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks({}, weight_type="lora"):
+                weight_tensors = [
+                    (n, slice_lora_to_rank(n, t, config.rank))
+                    for n, t in hf_named_tensors
+                    if is_lora_weight_name(n)
+                ]
+                if not weight_tensors:
+                    continue
+                lora_chunk_count += 1
+
+                if self._is_source:
+                    all_refs.extend(
+                        self._load_lora_adapter_from_tensors(
+                            adapter_name=adapter_name,
+                            lora_config=lora_config,
+                            weight_tensors=weight_tensors,
+                        )
+                    )
+
+        if lora_chunk_count == 0:
+            raise RuntimeError(
+                f"Multi-LoRA weight sync failed for adapter {adapter_name}: "
+                "the weight iterator produced zero LoRA chunks."
+            )
+
+        if all_refs:
+            _check_weight_sync_results(ray.get(all_refs), is_lora=True)
+
+    def _load_lora_adapter_from_tensors(
+        self,
+        *,
+        adapter_name: str,
+        lora_config: dict,
+        weight_tensors: list[tuple[str, torch.Tensor]],
+    ) -> list[ObjectRef]:
+        bucket = FlattenedTensorBucket(named_tensors=weight_tensors)
+        serialized = MultiprocessingSerializer.serialize(
+            {
+                "flattened_tensor": bucket.get_flattened_tensor(),
+                "metadata": bucket.get_metadata(),
+            },
+            output_str=True,
+        )
+        return [
+            engine.load_lora_adapter_from_tensors.remote(
+                lora_name=adapter_name,
+                config_dict=lora_config,
+                serialized_tensors=serialized,
+                load_format="flattened_bucket",
+            )
+            for engine in self.rollout_engines
+        ]

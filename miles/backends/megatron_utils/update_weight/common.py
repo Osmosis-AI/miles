@@ -2,7 +2,7 @@ import inspect
 import logging
 import re
 from argparse import Namespace
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 
 import ray
 import torch
@@ -296,3 +296,23 @@ def post_process_weights(
             for engine in rollout_engines
         ]
     )
+
+
+def _check_weight_sync_results(results: list, *, is_lora: bool) -> None:
+    """Validate rollout weight-sync RPC results and fail loudly on SGLang errors."""
+    sync_type = "LoRA" if is_lora else "Base model"
+    for result in results:
+        if isinstance(result, Mapping):
+            success = result.get("success")
+            error_msg = result.get("error_message") or result.get("error") or "unknown error"
+        elif hasattr(result, "success"):
+            success = result.success
+            error_msg = getattr(result, "error_message", "unknown error")
+        else:
+            continue
+
+        if success is False:
+            raise RuntimeError(
+                f"{sync_type} weight sync failed on rollout engine: {error_msg}. "
+                f"Check SGLang version compatibility."
+            )

@@ -32,6 +32,7 @@ class UpdateWeightFromDistributed(DistBucketedWeightUpdateMixin):
         model_name: str,
         quantization_config: dict[str, int | str | list[str]] | None,
         is_lora: bool = False,
+        is_multi_lora: bool = False,
     ) -> None:
         """
         Initialize. Groups created in connect_rollout_engines.
@@ -42,6 +43,14 @@ class UpdateWeightFromDistributed(DistBucketedWeightUpdateMixin):
         self.quantization_config = quantization_config
         self.weight_version = 0
         self._model_update_groups = None
+        self._init_lora(
+            args=args,
+            model=model,
+            model_name=model_name,
+            quantization_config=quantization_config,
+            is_lora=is_lora,
+            is_multi_lora=is_multi_lora,
+        )
 
     def connect_rollout_engines(
         self,
