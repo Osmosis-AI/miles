@@ -1,5 +1,6 @@
 from argparse import Namespace
 from collections.abc import Callable, Sequence
+from contextlib import nullcontext
 
 import ray
 import torch
@@ -12,7 +13,7 @@ from tqdm import tqdm
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.timer import timer
 
-from ...lora_utils import LORA_ADAPTER_NAME, _is_adapter_param_name, build_lora_sync_config, is_lora_weight_name
+from ...lora_utils import LORA_ADAPTER_NAME, build_lora_sync_config, is_lora_weight_name
 from ...megatron_to_hf import convert_to_hf
 from ...sglang import FlattenedTensorBucket, MultiprocessingSerializer
 from ..common import (
@@ -22,6 +23,13 @@ from ..common import (
     post_process_weights,
 )
 from ..hf_weight_iterator_base import HfWeightIteratorBase
+
+
+def _is_adapter_param_name(name: str) -> bool:
+    """Check if a parameter name belongs to a LoRA adapter (Megatron internal naming)."""
+    return "lora_" in name or (
+        (".adapter." in name or ".adapters." in name) and ("linear_in" in name or "linear_out" in name)
+    )
 
 
 class DistBucketedWeightUpdateMixin:
@@ -230,12 +238,15 @@ class DistBucketedWeightUpdateMixin:
             adapter_enabled = getattr(self, "is_lora", False) or getattr(self, "is_multi_lora", False)
             base_was_synced = getattr(self, "_lora_base_synced", False)
             if not (adapter_enabled and base_was_synced):
-                pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0) if self._is_source else None
+                if adapter_enabled:
+                    self._sync_base_weights_from_iterator()
+                else:
+                    pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0) if self._is_source else None
 
-                self._gather_and_update_non_expert_weights(self._update_weight_implementation, pbar)
-                dist.barrier(group=get_gloo_group())
-                self._gather_and_update_expert_weights(self._update_weight_implementation, pbar)
-                dist.barrier(group=get_gloo_group())
+                    self._gather_and_update_non_expert_weights(self._update_weight_implementation, pbar)
+                    dist.barrier(group=get_gloo_group())
+                    self._gather_and_update_expert_weights(self._update_weight_implementation, pbar)
+                    dist.barrier(group=get_gloo_group())
 
             if getattr(self, "is_multi_lora", False):
                 self._sync_multi_lora_weights()
@@ -250,6 +261,28 @@ class DistBucketedWeightUpdateMixin:
         with timer("finalize_and_resume_engines"):
             self._finalize_and_resume_engines()
             dist.barrier(group=get_gloo_group())
+
+    def _sync_base_weights_from_iterator(self) -> None:
+        """Sync frozen base weights through the configured HF iterator.
+
+        In bridge mode this avoids the legacy direct converter, which does not
+        understand Qwen3.5-VL vision parameters.
+        """
+        pbar = tqdm(desc=f"[{self._group_name}] Update base weights", total=0) if self._is_source else None
+        megatron_local_weights = self.weights_getter()
+        base_ctx = nullcontext()
+        if getattr(self, "is_multi_lora", False):
+            from megatron.bridge.peft.multi_lora_layers import hide_adapters
+
+            base_ctx = hide_adapters(self.model)
+
+        with base_ctx:
+            for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
+                megatron_local_weights, weight_type="base"
+            ):
+                if self._is_source:
+                    self._update_weight_implementation(list(hf_named_tensors), pbar)
+        dist.barrier(group=get_gloo_group())
 
     def _sync_lora_weights(self) -> None:
         """Sync a single LoRA adapter to rollout engines via Ray tensor RPCs."""

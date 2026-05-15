@@ -237,6 +237,8 @@ class TestIsAdapterParamName:
             "module.decoder.layers.0.self_attention.linear_qkv.lora_A.weight",
             "module.decoder.layers.0.self_attention.linear_qkv.adapter.linear_in.weight",
             "module.decoder.layers.0.self_attention.linear_qkv.adapter.linear_out.weight",
+            "module.decoder.layers.0.self_attention.linear_qkv.adapters.0.linear_in.weight",
+            "module.decoder.layers.0.self_attention.linear_qkv.adapters.1.linear_out.weight",
         ],
     )
     def test_positive(self, name):

@@ -103,7 +103,9 @@ def is_lora_weight_name(name: str) -> bool:
 
 def _is_adapter_param_name(name: str) -> bool:
     """Check if a parameter name belongs to a LoRA adapter (Megatron internal naming)."""
-    return "lora_" in name or (".adapter." in name and ("linear_in" in name or "linear_out" in name))
+    return "lora_" in name or (
+        (".adapter." in name or ".adapters." in name) and ("linear_in" in name or "linear_out" in name)
+    )
 
 
 _param_grad_buffer_patched = False

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 STATIC_ADAPTER_TEMPLATE = "gsm8k"
-STATIC_ADAPTER_COUNT = 2
+STATIC_ADAPTER_COUNT = 128
 STATIC_ADAPTER_PREFIX = "gsm8k"
 
 

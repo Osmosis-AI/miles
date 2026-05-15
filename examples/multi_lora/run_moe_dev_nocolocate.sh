@@ -44,10 +44,11 @@ ray job submit --address="http://127.0.0.1:8265" \
    --lora-dropout 0.0 \
    --target-modules "q_proj,k_proj,v_proj,o_proj" \
    --multi-lora-dir "${SCRIPT_DIR}/adapters" \
-   --multi-lora-n-adapters 2 \
+   --multi-lora-n-adapters 128 \
    --multi-lora-idle-poll-s 5 \
    --sglang-lora-backend triton \
    --sglang-disable-cuda-graph-padding \
+   --offload-train \
    \
    --prompt-data /root/gsm8k/train.parquet \
    --input-key messages \
@@ -55,11 +56,11 @@ ray job submit --address="http://127.0.0.1:8265" \
    --apply-chat-template \
    --rollout-shuffle \
    --num-rollout 50 \
-   --rollout-batch-size 32 \
-   --n-samples-per-prompt 8 \
+   --rollout-batch-size 128 \
+   --n-samples-per-prompt 4 \
    --rollout-max-response-len 4096 \
    --rollout-temperature 1 \
-   --global-batch-size 256 \
+   --global-batch-size 512 \
    \
    --save /tmp/multi_lora_dev2_save \
    --save-interval 1 \
@@ -80,10 +81,9 @@ ray job submit --address="http://127.0.0.1:8265" \
    \
    --tensor-model-parallel-size 1 \
    --pipeline-model-parallel-size 1 \
-   --context-parallel-size 1 \
    --expert-model-parallel-size 4 \
    --expert-tensor-parallel-size 1 \
-   --micro-batch-size 1 \
+   --micro-batch-size 2 \
    --max-tokens-per-gpu 670 \
    \
    --rollout-num-gpus-per-engine 4 \
@@ -102,4 +102,5 @@ ray job submit --address="http://127.0.0.1:8265" \
    --wandb-host https://wandb.ai/ \
    --wandb-entity artem-osmosis-osmosis-ai \
    --wandb-project miles-multilora \
+   --qkv-format bshd \
    --wandb-group qwen3-4B-dev2-dynamic

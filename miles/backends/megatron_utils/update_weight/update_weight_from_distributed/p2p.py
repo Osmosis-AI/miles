@@ -58,6 +58,7 @@ class UpdateWeightP2P(DistBucketedWeightUpdateMixin):
     ) -> None:
         self.args = args
         self.model = model
+        self.weights_getter = weights_getter
         self.model_name = model_name
         self.quantization_config = quantization_config
         self.weight_version = 0
