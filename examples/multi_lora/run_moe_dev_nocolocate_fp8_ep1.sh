@@ -1,34 +1,20 @@
 #!/bin/bash
-# Multi-LoRA dynamic-lifecycle dev run.
-#
-# Drives a hard-coded register/deregister schedule via
-# train_multi_lora_dynamic.py to exercise the online add/remove path:
-#   wait → +dapo → +gsm8k → -dapo → -gsm8k+wait → +gsm8k → +dapo → end
-#
-# Each productive phase runs 3 rollouts; the final phase runs to
-# --num-rollout. With 18 total productive rollouts, the final phase gets 6.
+# Multi-LoRA static FP8 dev run with four single-GPU SGLang replicas.
 
 set -ex
 
 export GPUS_PER_NODE=8
 
 pkill sglang || true
-pkill miles || true
-pkill Megatron || true
-kill -TERM "$(lsof -tiTCP:6379 -sTCP:LISTEN)"
+ray stop --force || true
 sleep 3
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 source scripts/models/qwen3.5-35B-A3B.sh
 
-ray start --head \
-  --node-ip-address 127.0.0.1 \
-  --port 6700 \
-  --dashboard-host 127.0.0.1 \
-  --dashboard-port 8267 \
-  --num-gpus "$GPUS_PER_NODE" \
-  --disable-usage-stats
-ray job submit --address="http://127.0.0.1:8267" \
+ray start --head --node-ip-address 127.0.0.1 --num-gpus $GPUS_PER_NODE --disable-usage-stats
+
+ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json='{
      "env_vars": {
         "PYTHONPATH": "/root/Megatron-LM",
@@ -37,24 +23,30 @@ ray job submit --address="http://127.0.0.1:8267" \
    }' \
    -- python3 examples/multi_lora/train_multi_lora_static.py \
    --actor-num-nodes 1 \
-   --actor-num-gpus-per-node $GPUS_PER_NODE \
-   --colocate \
+   --actor-num-gpus-per-node 4 \
+   --rollout-num-gpus 4 \
    --calculate-per-token-loss \
    --use-miles-router \
    ${MODEL_ARGS[@]} \
    \
-   --hf-checkpoint /root/Qwen3.5-35B-A3B \
+   --hf-checkpoint /root/Qwen3.6-35B-A3B-FP8 \
    --megatron-to-hf-mode bridge \
    \
    --lora-rank 32 \
    --lora-alpha 32 \
    --lora-dropout 0.0 \
-   --target-modules "o_proj" \
+   --target-modules "q_proj,k_proj,v_proj,o_proj" \
    --multi-lora-dir "${SCRIPT_DIR}/adapters" \
-   --multi-lora-n-adapters 2 \
+   --multi-lora-n-adapters 128 \
    --multi-lora-idle-poll-s 5 \
    --sglang-lora-backend triton \
-   --sglang-disable-cuda-graph \
+   --sglang-moe-runner-backend deep_gemm \
+   --sglang-max-running-requests 256 \
+   --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256) \
+   --transformer-impl transformer_engine \
+   --bf16 \
+   --fp8-format e4m3 \
+   --fp8-recipe blockwise \
    \
    --prompt-data /root/gsm8k/train.parquet \
    --input-key messages \
@@ -62,13 +54,13 @@ ray job submit --address="http://127.0.0.1:8267" \
    --apply-chat-template \
    --rollout-shuffle \
    --num-rollout 50 \
-   --rollout-batch-size 32 \
-   --n-samples-per-prompt 8 \
+   --rollout-batch-size 256 \
+   --n-samples-per-prompt 4 \
    --rollout-max-response-len 4096 \
    --rollout-temperature 1 \
-   --global-batch-size 256 \
+   --global-batch-size 1024 \
    \
-   --save /tmp/multi_lora_dev2_save \
+   --save /tmp/multi_lora_dev2_save_fp8_ep1 \
    --save-interval 1 \
    \
    --advantage-estimator grpo \
@@ -85,27 +77,28 @@ ray job submit --address="http://127.0.0.1:8267" \
    --adam-beta1 0.9 \
    --adam-beta2 0.98 \
    \
-   --tensor-model-parallel-size 2 \
-   --sequence-parallel \
+   --tensor-model-parallel-size 1 \
    --pipeline-model-parallel-size 1 \
-   --context-parallel-size 1 \
-   --expert-model-parallel-size 8 \
+   --expert-model-parallel-size 4 \
    --expert-tensor-parallel-size 1 \
-   --use-dynamic-batch-size \
-   --max-tokens-per-gpu 9216 \
+   --micro-batch-size 2 \
+   --max-tokens-per-gpu 670 \
    \
-   --rollout-num-gpus-per-engine 8 \
-   --sglang-ep-size 8 \
-   --sglang-mem-fraction-static 0.4 \
+   --rollout-num-gpus-per-engine 1 \
+   --sglang-tp-size 1 \
+   --sglang-ep-size 1 \
+   --sglang-mem-fraction-static 0.85 \
    \
    --attention-dropout 0.0 \
    --hidden-dropout 0.0 \
    --accumulate-allreduce-grads-in-fp32 \
    --attention-softmax-in-fp32 \
    --attention-backend flash \
+   --offload-train \
    \
    --use-wandb \
    --wandb-host https://wandb.ai/ \
    --wandb-entity artem-osmosis-osmosis-ai \
    --wandb-project miles-multilora \
-   --wandb-group qwen3-4B-dev2-dynamic
+   --qkv-format bshd \
+   --wandb-group qwen3-4B-dev2-dynamic-fp8-ep1

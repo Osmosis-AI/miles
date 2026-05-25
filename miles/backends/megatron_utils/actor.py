@@ -203,7 +203,8 @@ class MegatronTrainRayActor(TrainRayActor):
 
     @timer
     def sleep(self) -> None:
-        assert self.args.offload_train
+        if not self.args.offload_train:
+            return
 
         clear_memory(clear_host_memory=True)
         print_memory("before offload model")
@@ -219,7 +220,9 @@ class MegatronTrainRayActor(TrainRayActor):
 
     @timer
     def wake_up(self) -> None:
-        assert self.args.offload_train
+        if not self.args.offload_train:
+            return
+
         print_memory("before wake_up model")
 
         tag = "default" if is_lora_enabled(self.args) else None

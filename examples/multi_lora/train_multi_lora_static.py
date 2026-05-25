@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 STATIC_ADAPTER_TEMPLATE = "gsm8k"
-STATIC_ADAPTER_COUNT = 128
+STATIC_ADAPTER_COUNT = 4
 STATIC_ADAPTER_PREFIX = "gsm8k"
 
 
@@ -126,7 +126,8 @@ async def run_trainer(args, controller, rollout_manager, actor_model, num_rollou
             # Train already offloads the rollout
             if not run_train:
                 await offload_rollout()
-                await actor_model.onload()
+                if args.offload_train:
+                    await actor_model.onload()
 
             n_loaded = await actor_model.load_pending_adapters()
             n_unloaded = await actor_model.unload_drained_adapters(rollout_id)

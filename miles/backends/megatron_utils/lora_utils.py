@@ -262,7 +262,7 @@ def create_lora_instance(args: Namespace):
     target_modules = convert_target_modules_to_megatron(args.target_modules, lora_type=lora_cls)
 
     model_name = args.hf_checkpoint
-    if "Qwen3.5" in model_name:
+    if "Qwen3.5" in model_name or "Qwen3.6" in model_name:
         target_modules = exclude_mtp_vision_modules(target_modules)
 
     exclude_modules = parse_exclude_modules(args, lora_type=lora_cls)

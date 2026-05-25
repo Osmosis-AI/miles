@@ -27,7 +27,7 @@ def create_multi_lora(args: Namespace):
         lora_cls = LoRA
 
     target_modules = convert_target_modules_to_megatron(args.target_modules, lora_type=lora_cls)
-    if "Qwen3.5" in args.hf_checkpoint:
+    if "Qwen3.5" in args.hf_checkpoint or "Qwen3.6" in args.hf_checkpoint:
         target_modules = exclude_mtp_vision_modules(target_modules)
 
     return MultiLoRA(

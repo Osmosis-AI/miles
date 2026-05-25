@@ -1,8 +1,8 @@
-name: gsm8k
-rank: 16
-alpha: 16
+name: gsm8k_39
+rank: 8
+alpha: 8 
 data: /root/gsm8k/train.parquet
 input_key: messages
 label_key: label
 rm_type: math
-num_row: 400
+num_row: 1000
