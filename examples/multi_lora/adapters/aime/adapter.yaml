@@ -1,0 +1,8 @@
+name: aime_0 
+rank: 16
+alpha: 16
+data: /root/dapo-math-17k/dapo-math-17k.jsonl
+input_key: messages
+label_key: label
+rm_type: deepscaler 
+num_row: 10000

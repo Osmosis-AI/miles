@@ -13,67 +13,65 @@ set -ex
 export GPUS_PER_NODE=8
 
 pkill sglang || true
+ray stop --force || true
 pkill miles || true
 pkill Megatron || true
-kill -TERM "$(lsof -tiTCP:6379 -sTCP:LISTEN)"
 sleep 3
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 source scripts/models/qwen3.5-35B-A3B.sh
 
-ray start --head \
-  --node-ip-address 127.0.0.1 \
-  --port 6700 \
-  --dashboard-host 127.0.0.1 \
-  --dashboard-port 8267 \
-  --num-gpus "$GPUS_PER_NODE" \
-  --disable-usage-stats
-ray job submit --address="http://127.0.0.1:8267" \
+ray start --head --node-ip-address 127.0.0.1 --num-gpus $GPUS_PER_NODE --disable-usage-stats
+
+ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json='{
      "env_vars": {
         "PYTHONPATH": "/root/Megatron-LM",
-        "CUDA_DEVICE_MAX_CONNECTIONS": "1"
+        "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+        "NCCL_NVLS_ENABLE": "1",
+        "SGLANG_ENABLE_SPEC_V2": "1"
      }
    }' \
    -- python3 examples/multi_lora/train_multi_lora_static.py \
    --actor-num-nodes 1 \
-   --actor-num-gpus-per-node $GPUS_PER_NODE \
-   --colocate \
+   --actor-num-gpus-per-node 4 \
+   --rollout-num-gpus 4 \
    --calculate-per-token-loss \
-   --use-miles-router \
    ${MODEL_ARGS[@]} \
    \
-   --hf-checkpoint /root/Qwen3.5-35B-A3B \
+   --hf-checkpoint /data/Qwen3.5-35B-A3B \
    --megatron-to-hf-mode bridge \
-   \
-   --lora-rank 16 \
-   --lora-alpha 16 \
+   --lora-rank 8 \
+   --lora-alpha 8 \
    --lora-dropout 0.0 \
-   --target-modules "o_proj" \
+   --target-modules "q_proj,k_proj,v_proj" \
    --multi-lora-dir "${SCRIPT_DIR}/adapters" \
-   --multi-lora-n-adapters 2 \
+   --multi-lora-n-adapters 8 \
+   --sglang-moe-runner-backend deep_gemm \
    --multi-lora-idle-poll-s 5 \
    --sglang-lora-backend triton \
-   --sglang-disable-cuda-graph \
    \
-   --prompt-data /root/gsm8k/train.parquet \
-   --input-key messages \
+   --prompt-data /root/dapo-math-17k/dapo-math-17k.jsonl \
+   --log-probs-chunk-size 1024 \
+   --input-key prompt \
    --label-key label \
+   --rm-type deepscaler \
    --apply-chat-template \
    --rollout-shuffle \
-   --num-rollout 50 \
+   --num-rollout 1000 \
    --rollout-batch-size 32 \
-   --n-samples-per-prompt 8 \
-   --rollout-max-response-len 4096 \
+   --n-samples-per-prompt 2 \
+   --rollout-max-response-len 8192 \
    --rollout-temperature 1 \
-   --global-batch-size 256 \
+   --global-batch-size 64 \
    \
-   --save /tmp/multi_lora_dev2_save \
-   --save-interval 1 \
+   --save /tmp/test \
+   --save-interval 25 \
+   --log-interval 1 \
    \
    --advantage-estimator grpo \
    --kl-loss-coef 0.00 \
-   --kl-coef 0.00 \
+   --kl-loss-type low_var_kl \
    --entropy-coef 0.00 \
    --eps-clip 0.2 \
    --eps-clip-high 0.28 \
@@ -85,27 +83,30 @@ ray job submit --address="http://127.0.0.1:8267" \
    --adam-beta1 0.9 \
    --adam-beta2 0.98 \
    \
-   --tensor-model-parallel-size 2 \
-   --sequence-parallel \
+   --tensor-model-parallel-size 1 \
    --pipeline-model-parallel-size 1 \
-   --context-parallel-size 1 \
-   --expert-model-parallel-size 8 \
+   --expert-model-parallel-size 4 \
    --expert-tensor-parallel-size 1 \
-   --use-dynamic-batch-size \
-   --max-tokens-per-gpu 9216 \
+   --micro-batch-size 1 \
+   --max-tokens-per-gpu 1000 \
    \
-   --rollout-num-gpus-per-engine 8 \
-   --sglang-ep-size 8 \
-   --sglang-mem-fraction-static 0.4 \
+   --sglang-attention-backend fa3 \
+   --sglang-max-running-requests 1024 \
+   --sglang-chunked-prefill-size 4096 \
+   --sglang-cuda-graph-bs 1 2 4 8 511 512 1021 1022 1023 1024 $(seq 16 8 256) \
+   --sglang-mem-fraction-static 0.85 \
+   --rollout-num-gpus-per-engine 4 \
+   --sglang-ep-size 4 \
+   --sglang-deepep-mode auto \
+   --moe-token-dispatcher-type flex \
    \
    --attention-dropout 0.0 \
    --hidden-dropout 0.0 \
-   --accumulate-allreduce-grads-in-fp32 \
-   --attention-softmax-in-fp32 \
    --attention-backend flash \
    \
    --use-wandb \
    --wandb-host https://wandb.ai/ \
    --wandb-entity artem-osmosis-osmosis-ai \
    --wandb-project miles-multilora \
-   --wandb-group qwen3-4B-dev2-dynamic
+   --qkv-format bshd \
+   --wandb-group artem-multilora-ref
