@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import types
 from argparse import Namespace
 from collections.abc import Sequence
@@ -8,6 +9,8 @@ from collections.abc import Sequence
 import torch
 from megatron.core import mpu, tensor_parallel
 from megatron.core.utils import get_attr_wrapped_model
+
+logger = logging.getLogger(__name__)
 
 
 def should_enable_chunked_tp_logprob(args: Namespace, role: str) -> bool:
@@ -54,6 +57,7 @@ class ActorOutputProjection:
     def install_on(cls, model: torch.nn.Module | Sequence[torch.nn.Module]) -> ActorOutputProjection | None:
         chunks = model if isinstance(model, (list, tuple)) else [model]
         adapter: ActorOutputProjection | None = None
+        patched = 0
         for chunk in chunks:
             output_layer = get_attr_wrapped_model(chunk, "output_layer", allow_none=True)
             if output_layer is None:
@@ -61,6 +65,9 @@ class ActorOutputProjection:
             if adapter is None:
                 adapter = cls()
             adapter.patch(output_layer)
+            patched += 1
+        if adapter is not None:
+            logger.info("chunked TP logprob bypass installed on %d output_layer(s).", patched)
         return adapter
 
     def patch(self, output_layer: torch.nn.Module) -> None:
