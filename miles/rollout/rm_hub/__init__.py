@@ -62,6 +62,8 @@ async def async_rm(args, sample: Sample, **kwargs):
         return compute_score_dapo(response, label)
     elif rm_type == "math":
         return 1 if grade_answer_verl(response, label) else 0
+    elif rm_type == "exact":
+        return 1.0 if response == label else 0.0
     elif rm_type == "f1":
         return f1_score(response, label)[0]
     elif rm_type == "gpqa":

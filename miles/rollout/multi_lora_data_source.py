@@ -4,6 +4,7 @@ the trainer's lifecycle gate drives the rest of the state machine.
 """
 
 import copy
+import hashlib
 import logging
 from argparse import Namespace
 
@@ -47,6 +48,8 @@ class MultiLoRADataSource(DataSource):
     def _create_adapter_source(self, config: AdapterConfig) -> RolloutDataSource:
         adapter_args = copy.copy(self.args)
         adapter_args.prompt_data = config.data
+        seed_offset = int.from_bytes(hashlib.sha256(config.name.encode()).digest()[:4], "big")
+        adapter_args.rollout_seed = self.args.rollout_seed + seed_offset
         adapter_args.input_key = config.input_key or self.args.input_key
         adapter_args.label_key = config.label_key or self.args.label_key
         adapter_args.metadata_key = config.metadata_key or self.args.metadata_key

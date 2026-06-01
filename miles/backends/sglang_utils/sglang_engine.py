@@ -1,5 +1,6 @@
 import dataclasses
 import ipaddress
+import json
 import logging
 import multiprocessing
 import os
@@ -20,6 +21,33 @@ from miles.utils.env_report import collect_and_print_node_env_report
 from miles.utils.http_utils import get_host_info
 
 logger = logging.getLogger(__name__)
+
+_AGENT_DEBUG_LOG_PATH = "/root/miles/.cursor/debug-b04a63.log"
+_AGENT_DEBUG_SESSION_ID = "b04a63"
+_AGENT_DEBUG_LOG_COUNTS = {}
+
+
+def _agent_debug_log(hypothesis_id, location, message, data, limit=50):
+    key = (hypothesis_id, location, message)
+    count = _AGENT_DEBUG_LOG_COUNTS.get(key, 0)
+    if count >= limit:
+        return
+    _AGENT_DEBUG_LOG_COUNTS[key] = count + 1
+    try:
+        payload = {
+            "sessionId": _AGENT_DEBUG_SESSION_ID,
+            "id": f"log_{time.time_ns()}_{os.getpid()}",
+            "timestamp": int(time.time() * 1000),
+            "runId": os.environ.get("MILES_DEBUG_RUN_ID", "initial"),
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data | {"sequence": count},
+        }
+        with open(_AGENT_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
 
 
 def get_base_gpu_id(args, rank):
@@ -684,6 +712,28 @@ def _compute_server_args(
         logger.info(f"Warning: The following arguments is not supported in the current sglang: {unused_keys}.")
         for key in unused_keys:
             kwargs.pop(key)
+
+    # region agent log
+    _agent_debug_log(
+        "H1",
+        "miles/backends/sglang_utils/sglang_engine.py:_compute_server_args",
+        "computed sglang server args",
+        {
+            "rank": rank,
+            "worker_type": worker_type,
+            "disaggregation_mode": kwargs.get("disaggregation_mode"),
+            "enable_custom_logit_processor": kwargs.get("enable_custom_logit_processor"),
+            "requested_enable_custom_logit_processor": getattr(
+                args, "sglang_enable_custom_logit_processor", None
+            ),
+            "chunked_prefill_size": kwargs.get("chunked_prefill_size"),
+            "cuda_graph_bs": kwargs.get("cuda_graph_bs"),
+            "tp_size": kwargs.get("tp_size"),
+            "dp_size": kwargs.get("dp_size"),
+            "ep_size": kwargs.get("ep_size"),
+        },
+    )
+    # endregion
 
     return kwargs, external_engine_need_check_fields
 

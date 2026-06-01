@@ -442,7 +442,7 @@ async def generate_rollout_async(
 
     metric_gatherer = MetricGatherer()
 
-    # target_data_size is the total number of valid samples to get
+    # target_data_size is the total number of valid sample groups to get
     target_data_size = args.rollout_batch_size
 
     data = []
@@ -452,7 +452,12 @@ async def generate_rollout_async(
     while len(data) < target_data_size:
         while state.remaining_batch_size < target_data_size:
             # get samples from the buffer and submit the generation requests.
-            samples = data_source(args.over_sampling_batch_size)
+            sampling_batch_size = args.over_sampling_batch_size
+            if getattr(args, "multi_lora", False):
+                # Keep each multi-LoRA sampling wave at the rollout batch size.
+                # The data source splits this global group count across active adapters.
+                sampling_batch_size = min(args.over_sampling_batch_size, target_data_size)
+            samples = data_source(sampling_batch_size)
             state.submit_generate_tasks(samples)
 
         # wait for the generation to finish

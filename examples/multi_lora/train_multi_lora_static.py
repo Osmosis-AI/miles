@@ -23,9 +23,9 @@ from miles.utils.tracking_utils import init_tracking
 logger = logging.getLogger(__name__)
 
 
-STATIC_ADAPTER_TEMPLATE = "gsm8k"
-STATIC_ADAPTER_COUNT = 4
-STATIC_ADAPTER_PREFIX = "gsm8k"
+STATIC_ADAPTER_TEMPLATE = "aime"
+STATIC_ADAPTER_COUNT = 8
+STATIC_ADAPTER_PREFIX = "aime"
 
 
 def prepare_static_adapter_dirs(multi_lora_dir: Path) -> list[Path]:
