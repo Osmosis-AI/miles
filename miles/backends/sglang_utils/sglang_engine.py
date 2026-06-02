@@ -386,6 +386,28 @@ class SGLangEngine(RayActor):
             payload,
         )
 
+    def load_lora_from_object_ref(self, tensors: dict, adapter_name: str, lora_config: dict):
+        """Load LoRA adapter from tensors transferred via Ray object store (cross-node safe).
+
+        Ray automatically resolves the ObjectRef before invoking this method,
+        so `tensors` is already the actual dict of CPU tensors — no ray.get() needed.
+        Serializes to safetensors bytes for the local HTTP POST to the SGLang server.
+        No CUDA pointer crosses node boundaries.
+        """
+        import base64
+        from safetensors.torch import save as st_save
+
+        serialized = base64.b64encode(st_save(tensors)).decode()
+        return self._make_request(
+            "load_lora_adapter_from_tensors",
+            {
+                "lora_name": adapter_name,
+                "serialized_tensors": serialized,
+                "config_dict": lora_config,
+                "load_format": "safetensors_bytes",
+            },
+        )
+
     def flush_cache(self):
         """Flush the cache of the server."""
         if self.node_rank != 0:

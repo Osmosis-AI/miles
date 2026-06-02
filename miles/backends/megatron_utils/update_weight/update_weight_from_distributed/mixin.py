@@ -66,6 +66,9 @@ class DistBucketedWeightUpdateMixin:
         self._lora_loaded = False
         self._lora_base_synced = False
         self._multi_lora_loaded: set[str] = set()
+        # True when trainer and rollout are on different nodes (disaggregated).
+        # Ray object store path is used instead of CUDA pointer serialization.
+        self._lora_use_cross_node = not getattr(args, "colocate", False)
 
         if self.is_lora or self.is_multi_lora:
             self._hf_weight_iterator = HfWeightIteratorBase.create(
@@ -299,8 +302,9 @@ class DistBucketedWeightUpdateMixin:
             lora_chunk_count += 1
 
             if self._is_source:
+                loader = self._load_lora_adapter_cross_node if self._lora_use_cross_node else self._load_lora_adapter_from_tensors
                 all_refs.extend(
-                    self._load_lora_adapter_from_tensors(
+                    loader(
                         adapter_name=LORA_ADAPTER_NAME,
                         lora_config=self._lora_config,
                         weight_tensors=weight_tensors,
@@ -362,8 +366,9 @@ class DistBucketedWeightUpdateMixin:
                 lora_chunk_count += 1
 
                 if self._is_source:
+                    loader = self._load_lora_adapter_cross_node if self._lora_use_cross_node else self._load_lora_adapter_from_tensors
                     all_refs.extend(
-                        self._load_lora_adapter_from_tensors(
+                        loader(
                             adapter_name=adapter_name,
                             lora_config=lora_config,
                             weight_tensors=weight_tensors,
@@ -386,6 +391,8 @@ class DistBucketedWeightUpdateMixin:
         lora_config: dict,
         weight_tensors: list[tuple[str, torch.Tensor]],
     ) -> list[ObjectRef]:
+        # Colocated (same-node) path: pointer-based via MultiprocessingSerializer.
+        # Fast but requires both sender and receiver to share CUDA memory space.
         bucket = FlattenedTensorBucket(named_tensors=weight_tensors)
         serialized = MultiprocessingSerializer.serialize(
             {
@@ -400,6 +407,29 @@ class DistBucketedWeightUpdateMixin:
                 config_dict=lora_config,
                 serialized_tensors=serialized,
                 load_format="flattened_bucket",
+            )
+            for engine in self.rollout_engines
+        ]
+
+    def _load_lora_adapter_cross_node(
+        self,
+        *,
+        adapter_name: str,
+        lora_config: dict,
+        weight_tensors: list[tuple[str, torch.Tensor]],
+    ) -> list[ObjectRef]:
+        # Disaggregated (cross-node) path: Ray object store for tensor transfer.
+        # ray.put() stores tensors on the trainer node; each SGLangEngine actor
+        # calls ray.get() which Ray transfers across nodes automatically.
+        # The actor serializes locally to safetensors bytes for the HTTP POST
+        # to its co-located SGLang server — no CUDA pointer crossing nodes.
+        tensors_dict = {name: t.cpu().contiguous() for name, t in weight_tensors}
+        obj_ref = ray.put(tensors_dict)
+        return [
+            engine.load_lora_from_object_ref.remote(
+                obj_ref,        # positional so Ray tracks it as ObjectRef for cross-node transfer
+                adapter_name,
+                lora_config,
             )
             for engine in self.rollout_engines
         ]
