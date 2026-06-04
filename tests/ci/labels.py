@@ -18,6 +18,7 @@ here: they bypass the per-test labels filter and run the full suite via the
 
 KNOWN_LABELS: dict[str, str] = {
     "megatron": "Megatron-LM training tests",
+    "model-scripts": "Model launch script smoke tests",
     "sglang": "SGLang patch / equivalence tests",
     "fsdp": "FSDP training tests",
     "short": "Short 8-GPU smoke tests",
@@ -25,4 +26,6 @@ KNOWN_LABELS: dict[str, str] = {
     "ckpt": "Checkpoint save / load tests",
     "lora": "LoRA training tests",
     "precision": "Numerical precision parity tests",
+    "weight-update": "Weight update tests",
+    "replay": "Routing / indexer replay tests",
 }
