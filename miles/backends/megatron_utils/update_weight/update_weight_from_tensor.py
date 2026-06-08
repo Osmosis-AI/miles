@@ -418,19 +418,20 @@ def _send_to_colocated_engine(
             if lora_loaded:
                 ray.get(ipc_engine.unload_lora_adapter.remote(lora_name=lora_name))
 
-            # (Yusheng) to-do-1: update lora weights from tensors should support multiple dtypes (bf16, fp8, fp16, fp32)
-            # currently, we only support 1 type. If there are multiple dtypes, we need to serialize the tensors for each dtype.
-            # Thus, we need to apply the same way as `ipc_engine.update_weights_from_tensor` in future
-            # (Yusheng) to-do-2: need to add ci test acc here - now it will pass but fail to update lora weights
-
-            refs.append(
-                ipc_engine.load_lora_adapter_from_tensors.remote(
-                    lora_name=lora_name,
-                    config_dict=lora_config,
-                    serialized_tensors=serialized_named_tensors[0][0],
-                    load_format="flattened_bucket",
+            # LoRA tensors are rank-replicated, so we keep `[0]` for rank and loop
+            # the dtype index. Successive load calls under the same `lora_name` are
+            # merged server-side by SGLang into a single adapter — same pattern the
+            # distributed mixin uses for per-chunk loads (see mixin.py:_load_lora_adapter_from_tensors).
+            num_dtypes = len(serialized_named_tensors[0])
+            for i in range(num_dtypes):
+                refs.append(
+                    ipc_engine.load_lora_adapter_from_tensors.remote(
+                        lora_name=lora_name,
+                        config_dict=lora_config,
+                        serialized_tensors=serialized_named_tensors[0][i],
+                        load_format="flattened_bucket",
+                    )
                 )
-            )
 
         else:
             num_dtypes = len(serialized_named_tensors[0])
