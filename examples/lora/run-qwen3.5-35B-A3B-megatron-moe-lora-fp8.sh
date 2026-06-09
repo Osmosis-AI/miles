@@ -37,8 +37,13 @@ echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
 source "/root/miles/scripts/models/qwen3.5-35B-A3B.sh"
 
 CKPT_ARGS=(
+   # Bridge mode loads the base model from --hf-checkpoint via Megatron-Bridge.
+   # No --ref-load: a torch_dist load routes through Megatron dist_checkpointing,
+   # which crashes on this hybrid-GDN model's _extra_state
+   # (_replace_sharded_keys_with_state_dict_keys: "BytesIO has no len()"),
+   # regardless of which image built the torch_dist. The canonical MoE-LoRA
+   # bridge recipe (run-gpt-oss-20B-megatron-moe-lora.sh) loads from HF instead.
    --hf-checkpoint /root/Qwen3.5-35B-A3B-FP8
-   --ref-load      /root/Qwen3.5-35B-A3B_torch_dist
 )
 
 LORA_ARGS=(
