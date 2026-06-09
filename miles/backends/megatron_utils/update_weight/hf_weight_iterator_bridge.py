@@ -1,4 +1,5 @@
 import dataclasses
+import os
 
 from miles.backends.megatron_utils.lora_utils import is_lora_weight_name
 from miles.utils import megatron_bridge_utils
@@ -55,6 +56,12 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
 
             if weight_type == "base":
                 named_weights = ((n, t) for n, t in named_weights if not is_lora_weight_name(n))
+                if os.environ.get("MILES_SKIP_BASE_EXPERT_SYNC") == "1":
+                    # LoRA run: base is frozen and SGLang already holds it from the
+                    # FP8 HF checkpoint, so re-syncing the routed-expert base weights
+                    # is redundant. Skip them to bypass the grouped-gemm FP8 export
+                    # whose name/format doesn't yet match SGLang's fused w13_weight.
+                    named_weights = ((n, t) for n, t in named_weights if ".experts." not in n)
             elif weight_type == "lora":
                 named_weights = ((n, t) for n, t in named_weights if is_lora_weight_name(n))
 
