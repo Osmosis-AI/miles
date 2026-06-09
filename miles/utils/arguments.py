@@ -341,6 +341,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--rollout-thinking-budget",
+                type=int,
+                default=None,
+                help="Token budget for model thinking before forcing answer handoff.",
+            )
+            parser.add_argument(
                 "--rollout-skip-special-tokens",
                 action="store_true",
                 default=False,
