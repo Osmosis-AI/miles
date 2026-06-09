@@ -129,13 +129,17 @@ WANDB_ARGS=(
 )
 
 SGLANG_ARGS=(
-   --rollout-num-gpus-per-engine 8
+   # Block-wise FP8 layout is [128,128], so every tensor-sharded weight
+   # sub-partition must stay a multiple of 128. The shared-expert MLP shards
+   # across the engine's dense TP, which miles forces to equal
+   # --rollout-num-gpus-per-engine (it overwrites --sglang-tp-size; see
+   # backends/sglang_utils/arguments.py:136 -- so that flag is a no-op).
+   # With shared_expert_intermediate=512 the gate/up sub-partition (512/worldTP)
+   # and the down input (512/worldTP) must each be a multiple of 128 => worldTP
+   # <= 4. worldTP=8 gives 64 (the prior failure), so run 2 engines x 4 GPUs.
+   # ep=4 == worldTP keeps the 256 routed experts whole (moe_tp = worldTP/ep = 1).
+   --rollout-num-gpus-per-engine 4
    --sglang-mem-fraction-static 0.4
-   # Block-wise FP8 layout is [128, 128]. After sharding, shared-expert
-   # intermediate (512) and KV projection (2 * 256 = 512) must each remain a
-   # multiple of 128. On 8 GPUs the only split that satisfies both is TP=2,
-   # EP=4: tp=1/ep=8 collapses shared expert to 64; tp=8/ep=1 collapses KV.
-   --sglang-tp-size 2
    --sglang-ep-size 4
    --sglang-dtype bfloat16
 
