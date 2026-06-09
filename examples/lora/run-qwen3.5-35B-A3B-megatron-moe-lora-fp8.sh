@@ -85,7 +85,7 @@ PERF_ARGS=(
    --sequence-parallel
    --pipeline-model-parallel-size 1
    --context-parallel-size 1
-   --expert-model-parallel-size 4   # non-colocate: actor on 4 GPUs (256 experts / 4 = 64 per GPU)
+   --expert-model-parallel-size 8
    --expert-tensor-parallel-size 1
 
    --recompute-granularity full
@@ -146,6 +146,9 @@ SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 4
    --sglang-mem-fraction-static 0.4
    --sglang-ep-size 4
+   # Hybrid-GDN cuda-graph capture deadlocks during colocate init (rank-3 stall);
+   # run the rollout engines eager to dodge it. Re-enable + tune capture later.
+   --sglang-disable-cuda-graph
    --sglang-dtype bfloat16
 
    --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256)
@@ -182,8 +185,8 @@ ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
    -- python3 train.py \
    --actor-num-nodes 1 \
-   --actor-num-gpus-per-node 4 \
-   --rollout-num-gpus 4 \
+   --actor-num-gpus-per-node 8 \
+   --colocate \
    ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
    ${ROLLOUT_ARGS[@]} \
