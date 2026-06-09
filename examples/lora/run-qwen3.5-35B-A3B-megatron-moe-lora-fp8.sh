@@ -131,8 +131,12 @@ WANDB_ARGS=(
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 8
    --sglang-mem-fraction-static 0.4
-   --sglang-tp-size 1
-   --sglang-ep-size 8
+   # Block-wise FP8 layout is [128, 128]. After sharding, shared-expert
+   # intermediate (512) and KV projection (2 * 256 = 512) must each remain a
+   # multiple of 128. On 8 GPUs the only split that satisfies both is TP=2,
+   # EP=4: tp=1/ep=8 collapses shared expert to 64; tp=8/ep=1 collapses KV.
+   --sglang-tp-size 2
+   --sglang-ep-size 4
    --sglang-dtype bfloat16
 
    --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256)
