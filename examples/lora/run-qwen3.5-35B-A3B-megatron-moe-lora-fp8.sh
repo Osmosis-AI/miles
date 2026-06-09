@@ -80,7 +80,7 @@ PERF_ARGS=(
    --sequence-parallel
    --pipeline-model-parallel-size 1
    --context-parallel-size 1
-   --expert-model-parallel-size 8
+   --expert-model-parallel-size 4   # non-colocate: actor on 4 GPUs (256 experts / 4 = 64 per GPU)
    --expert-tensor-parallel-size 1
 
    --recompute-granularity full
@@ -177,8 +177,8 @@ ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
    -- python3 train.py \
    --actor-num-nodes 1 \
-   --actor-num-gpus-per-node 8 \
-   --colocate \
+   --actor-num-gpus-per-node 4 \
+   --rollout-num-gpus 4 \
    ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
    ${ROLLOUT_ARGS[@]} \
