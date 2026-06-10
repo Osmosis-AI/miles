@@ -73,6 +73,7 @@ ROLLOUT_ARGS=(
 )
 
 EVAL_ARGS=(
+   --skip-eval-before-train
    --eval-interval 20
    --eval-prompt-data aime /root/aime-2024/aime-2024.jsonl
    --n-samples-per-eval-prompt 1
