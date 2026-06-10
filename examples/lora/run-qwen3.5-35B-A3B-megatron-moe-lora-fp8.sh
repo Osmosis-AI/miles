@@ -101,7 +101,10 @@ PERF_ARGS=(
    # bshd pads each sequence instead (requires static micro batches).
    --qkv-format bshd
    --micro-batch-size 1
-   --no-offload-train
+   # Keep the colocate default (offload-train=True): after the first train
+   # step the trainer's reserved pool grows past ~70GB/rank and the SGLang
+   # KV resume (torch_memory_saver cuMemCreate) OOMs unless the trainer
+   # offloads between steps.
 
    # use deepep for megatron MoE
    --moe-enable-deepep
