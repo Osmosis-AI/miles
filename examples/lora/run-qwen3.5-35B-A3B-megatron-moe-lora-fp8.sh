@@ -142,10 +142,16 @@ SGLANG_ARGS=(
    # With shared_expert_intermediate=512 the gate/up sub-partition (512/worldTP)
    # and the down input (512/worldTP) must each be a multiple of 128 => worldTP
    # <= 4. worldTP=8 gives 64 (the prior failure), so run 2 engines x 4 GPUs.
-   # ep=4 == worldTP keeps the 256 routed experts whole (moe_tp = worldTP/ep = 1).
+   # ep=1: EP > 1 marks non-local experts as -1 in topk_ids
+   # (token_dispatcher/standard.py local_expert_mapping), and the MoE-LoRA
+   # align kernel's sort phase (moe_lora_align_kernel.cu
+   # _count_and_sort_expert_tokens) misses the <0 filter => CUDA IMA during
+   # generation. At ep=1 no -1 sentinels exist; routed experts TP-shard
+   # instead: moe_ffn 512/worldTP(4) = 128, still a multiple of the FP8
+   # block. Re-enable EP once the kernel filter is fixed in the image.
    --rollout-num-gpus-per-engine 4
    --sglang-mem-fraction-static 0.4
-   --sglang-ep-size 4
+   --sglang-ep-size 1
    # Hybrid-GDN cuda-graph capture deadlocks during colocate init (rank-3 stall);
    # run the rollout engines eager to dodge it. Re-enable + tune capture later.
    --sglang-disable-cuda-graph
