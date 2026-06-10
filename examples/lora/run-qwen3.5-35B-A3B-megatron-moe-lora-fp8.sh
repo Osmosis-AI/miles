@@ -65,7 +65,9 @@ ROLLOUT_ARGS=(
    --num-rollout 3000
    --rollout-batch-size 32
    --n-samples-per-prompt 8
-   --rollout-max-response-len 8192
+   # 4096 keeps the Float16Module fp32 logits upcast (seq x vocab x 4B, the
+   # train-step OOM at 8192) under control on the colocated H200s.
+   --rollout-max-response-len 4096
    --rollout-temperature 1
 
    --global-batch-size 256
