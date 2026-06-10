@@ -92,8 +92,12 @@ PERF_ARGS=(
    --recompute-method uniform
    --recompute-num-layers 1
 
-   --use-dynamic-batch-size
-   --max-tokens-per-gpu 8192
+   # Megatron's GDN layer rejects packed sequences
+   # (megatron/core/ssm/gated_delta_net.py "GDN does not support packed
+   # sequence"), and miles only builds PackedSeqParams for qkv-format=thd.
+   # bshd pads each sequence instead (requires static micro batches).
+   --qkv-format bshd
+   --micro-batch-size 1
    --no-offload-train
 
    # use deepep for megatron MoE
