@@ -1,5 +1,7 @@
 import asyncio
 import copy
+import dill
+import json
 import logging
 import uuid
 from argparse import Namespace
@@ -30,6 +32,7 @@ from miles.utils.processing_utils import (
     load_tokenizer,
 )
 from miles.utils.types import Sample
+from sglang.srt.sampling.custom_logit_processor import ThinkingBudgetLogitProcessor
 
 from .generate_utils.generate_endpoint_utils import get_indexer_topk_from_response
 from .generate_utils.prefill_logprobs import recompute_samples_rollout_logprobs_via_prefill
@@ -38,6 +41,147 @@ from .rm_hub import async_rm, batched_async_rm
 __all__ = ["generate_rollout", "get_model_url"]
 
 logger = logging.getLogger(__name__)
+
+
+class Qwen3_5ThinkingBudgetProcessor(ThinkingBudgetLogitProcessor):
+    """Thinking-budget logit processor for Qwen3.5 models."""
+
+    THINKING_START_TOKEN_ID: int = 248068
+    THINKING_END_TOKEN_ID: int = 248069
+    NEW_LINE_TOKEN_ID: int = 198
+
+
+class Qwen3_5ThinkingBudgetExceededProcessor(Qwen3_5ThinkingBudgetProcessor):
+    """Close thinking and start the answer when a Qwen3.5 thinking budget is exhausted."""
+
+    BUDGET_EXCEEDED_PREFIX: str = (
+        ". Wait, i seem to have reached the end of my thinking budget, "
+        "so i should immediately return the answer \n "
+    )
+    ANSWER_PREFIX: str = "Answer: \\boxed{ "
+    INJECTION_TOKEN_IDS_PARAM: str = "thinking_budget_exceeded_token_ids"
+    THINKING_START_TOKEN_ID_PARAM: str = "thinking_start_token_id"
+    THINKING_END_TOKEN_ID_PARAM: str = "thinking_end_token_id"
+
+    def __init__(
+        self,
+        thinking_budget: int = 1000,
+        injection_token_ids: list[int] | None = None,
+        thinking_start_token_id: int | None = None,
+        thinking_end_token_id: int | None = None,
+    ) -> None:
+        self.thinking_budget = thinking_budget
+        self.injection_token_ids = injection_token_ids or []
+        self.thinking_start_token_id = (
+            self.THINKING_START_TOKEN_ID if thinking_start_token_id is None else int(thinking_start_token_id)
+        )
+        self.thinking_end_token_id = (
+            self.THINKING_END_TOKEN_ID if thinking_end_token_id is None else int(thinking_end_token_id)
+        )
+        self._agent_injection_offsets: dict[str, int] = {}
+
+    @staticmethod
+    def _single_token_id(tokenizer: Any, text: str) -> int:
+        token_ids = tokenizer.encode(text, add_special_tokens=False)
+        if len(token_ids) != 1:
+            raise ValueError(f"Expected {text!r} to encode as one token, got {token_ids}")
+        return int(token_ids[0])
+
+    @classmethod
+    def build_injection_token_ids(cls, tokenizer: Any, thinking_end_token_id: int) -> list[int]:
+        budget_exceeded_prefix_token_ids = tokenizer.encode(cls.BUDGET_EXCEEDED_PREFIX, add_special_tokens=False)
+        answer_prefix_token_ids = tokenizer.encode(cls.ANSWER_PREFIX, add_special_tokens=False)
+        return [
+            *[int(token_id) for token_id in budget_exceeded_prefix_token_ids],
+            int(thinking_end_token_id),
+            cls.NEW_LINE_TOKEN_ID,
+            *[int(token_id) for token_id in answer_prefix_token_ids],
+        ]
+
+    def to_str(self) -> str:
+        """Serialize this configured processor instance for SGLang workers."""
+        return json.dumps({"callable": dill.dumps(self).hex()})
+
+    @staticmethod
+    def _matching_injection_prefix_len(output_ids: list[int], injection_token_ids: list[int]) -> int:
+        max_prefix_len = min(len(output_ids), len(injection_token_ids))
+        for prefix_len in range(max_prefix_len, 0, -1):
+            if output_ids[-prefix_len:] == injection_token_ids[:prefix_len]:
+                return prefix_len
+        return 0
+
+    def __call__(self, logits, custom_param_list: list[dict[str, Any]]):
+        if custom_param_list is None or not custom_param_list:
+            return logits
+
+        rows_per_param = max(1, logits.shape[0] // len(custom_param_list))
+
+        for i, param_dict in enumerate(custom_param_list):
+            if param_dict is None:
+                continue
+
+            thinking_budget: int | None = param_dict.get("thinking_budget", self.thinking_budget)
+            if thinking_budget is None or not isinstance(thinking_budget, int) or thinking_budget < 0:
+                continue
+
+            req = param_dict.get("__req__")
+            if req is None:
+                continue
+
+            try:
+                injection_token_ids = [
+                    int(token_id)
+                    for token_id in param_dict.get(self.INJECTION_TOKEN_IDS_PARAM, self.injection_token_ids)
+                ]
+            except (TypeError, ValueError):
+                continue
+
+            if not injection_token_ids:
+                continue
+
+            output_ids: list[int] = [*req.output_ids]
+            req_rid = str(getattr(req, "rid", "unknown"))
+            thinking_end_token_id = int(param_dict.get(self.THINKING_END_TOKEN_ID_PARAM, self.thinking_end_token_id))
+            trigger_output_len = max(thinking_budget - 1, 0)
+            injection_offset = self._agent_injection_offsets.get(req_rid)
+
+            if len(output_ids) < trigger_output_len:
+                continue
+
+            if injection_offset is None:
+                injection_offset = self._matching_injection_prefix_len(output_ids, injection_token_ids)
+
+            end_token_index = output_ids.index(thinking_end_token_id) if thinking_end_token_id in output_ids else None
+
+            if end_token_index is not None and injection_offset == 0:
+                continue
+
+            if req_rid not in self._agent_injection_offsets:
+                self._agent_injection_offsets[req_rid] = injection_offset
+
+            if injection_offset >= len(injection_token_ids):
+                if end_token_index is not None:
+                    self._agent_injection_offsets.pop(req_rid, None)
+                continue
+
+            row_start = i * rows_per_param
+            row_end = min(row_start + rows_per_param, logits.shape[0])
+            forced_token_count = 0
+            for row_idx in range(row_start, row_end):
+                token_offset = injection_offset + row_idx - row_start
+                if token_offset >= len(injection_token_ids):
+                    break
+                logits[row_idx, :] = -float("inf")
+                logits[row_idx, injection_token_ids[token_offset]] = 0.0
+                forced_token_count += 1
+
+            next_injection_offset = injection_offset + forced_token_count
+            if next_injection_offset >= len(injection_token_ids):
+                self._agent_injection_offsets[req_rid] = len(injection_token_ids)
+            else:
+                self._agent_injection_offsets[req_rid] = next_injection_offset
+
+        return logits
 
 
 def get_model_url(args: Namespace, model_name: str, endpoint: str = "/generate") -> str:
@@ -105,6 +249,24 @@ class GenerateState(metaclass=SingletonMeta):
             args.hf_checkpoint, chat_template_path=args.chat_template_path, trust_remote_code=True
         )
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
+        self.thinking_budget_start_token_id = (
+            Qwen3_5ThinkingBudgetExceededProcessor._single_token_id(self.tokenizer, "<think>")
+            if getattr(args, "rollout_thinking_budget", None) is not None
+            else None
+        )
+        self.thinking_budget_end_token_id = (
+            Qwen3_5ThinkingBudgetExceededProcessor._single_token_id(self.tokenizer, "</think>")
+            if getattr(args, "rollout_thinking_budget", None) is not None
+            else None
+        )
+        self.thinking_budget_exceeded_token_ids = (
+            Qwen3_5ThinkingBudgetExceededProcessor.build_injection_token_ids(
+                self.tokenizer,
+                thinking_end_token_id=self.thinking_budget_end_token_id,
+            )
+            if getattr(args, "rollout_thinking_budget", None) is not None
+            else []
+        )
 
         self.semaphore = asyncio.Semaphore(
             args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
@@ -208,6 +370,36 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         "sampling_params": sampling_params,
         "return_logprob": True,
     }
+
+    thinking_budget = getattr(args, "rollout_thinking_budget", None)
+    if thinking_budget is not None:
+        sampling_params["custom_params"] = {
+            **(sampling_params.get("custom_params") or {}),
+            "thinking_budget": thinking_budget,
+            Qwen3_5ThinkingBudgetExceededProcessor.INJECTION_TOKEN_IDS_PARAM: (
+                state.thinking_budget_exceeded_token_ids
+            ),
+            Qwen3_5ThinkingBudgetExceededProcessor.THINKING_START_TOKEN_ID_PARAM: (
+                state.thinking_budget_start_token_id
+            ),
+            Qwen3_5ThinkingBudgetExceededProcessor.THINKING_END_TOKEN_ID_PARAM: state.thinking_budget_end_token_id,
+        }
+        payload["custom_logit_processor"] = Qwen3_5ThinkingBudgetExceededProcessor(
+            thinking_budget=thinking_budget,
+            injection_token_ids=state.thinking_budget_exceeded_token_ids,
+            thinking_start_token_id=state.thinking_budget_start_token_id,
+            thinking_end_token_id=state.thinking_budget_end_token_id,
+        ).to_str()
+
+        if not getattr(state, "_logged_thinking_budget_processor", False):
+            logger.info(
+                "Using Qwen3.5 thinking budget processor: budget=%d, start_token=%s, end_token=%s, injection_tokens=%d",
+                sampling_params["custom_params"]["thinking_budget"],
+                state.thinking_budget_start_token_id,
+                state.thinking_budget_end_token_id,
+                len(state.thinking_budget_exceeded_token_ids),
+            )
+            state._logged_thinking_budget_processor = True
 
     if sample.adapter is not None:
         payload["lora_path"] = sample.adapter.name
