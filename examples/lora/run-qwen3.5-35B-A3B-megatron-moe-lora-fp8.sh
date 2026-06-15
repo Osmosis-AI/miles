@@ -50,8 +50,13 @@ LORA_ARGS=(
    --lora-rank 32                    # LoRA rank
    --lora-alpha 32                   # LoRA alpha (= rank for RL)
    --lora-dropout 0.0                # 0 for RL
-   --target-modules "gate_proj,up_proj,down_proj"   # MoE expert projections
-   --sglang-lora-backend triton                      # required for MoE LoRA
+   # ABLATION: attention-only LoRA (q/k/v/o) to bypass SGLang's experimental
+   # MoE-LoRA fused triton kernel, which corrupts rollout generation (word-salad)
+   # even with a no-op adapter. Base FP8 serves clean standalone; only the
+   # MoE-LoRA fused path differs. Matches the canonical multi_lora FP8 example.
+   # Revert to "gate_proj,up_proj,down_proj" to test MoE-LoRA once the kernel is fixed.
+   --target-modules "q_proj,k_proj,v_proj,o_proj"   # attention projections
+   --sglang-lora-backend triton
    --megatron-to-hf-mode bridge                      # required for LoRA path
 )
 
