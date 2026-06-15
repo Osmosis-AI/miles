@@ -1,4 +1,5 @@
 import logging
+import os
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
@@ -198,8 +199,17 @@ class UpdateWeightFromTensor:
 
         megatron_local_weights = self.weights_getter()
 
-        # For LoRA+distributed: base weights are frozen, skip after first round.
-        if not (self.is_lora and self.use_distribute and self._lora_base_synced):
+        # LoRA: base is frozen and SGLang already serves it from the FP8 HF
+        # checkpoint (--model-path). Re-exporting + re-quantizing the fused base
+        # (linear_qkv / gated q_proj / shared_expert) every round is redundant
+        # and corrupts the block-FP8 weights, so skip the base sync entirely and
+        # let SGLang keep its disk-loaded base. Only the adapters sync.
+        # Distributed LoRA already skips base after round 1; this extends it to
+        # colocate via MILES_SKIP_BASE_SYNC.
+        skip_base_sync = (self.is_lora and self.use_distribute and self._lora_base_synced) or (
+            (self.is_lora or self.is_multi_lora) and os.environ.get("MILES_SKIP_BASE_SYNC") == "1"
+        )
+        if not skip_base_sync:
             base_ctx = nullcontext()
             if self.is_multi_lora:
                 # For multi_lora, hide the multi-adapter layer entirely so it doesn't
