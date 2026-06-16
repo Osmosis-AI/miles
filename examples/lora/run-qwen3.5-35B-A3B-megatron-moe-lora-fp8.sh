@@ -50,11 +50,13 @@ LORA_ARGS=(
    --lora-rank 32                    # LoRA rank
    --lora-alpha 32                   # LoRA alpha (= rank for RL)
    --lora-dropout 0.0                # 0 for RL
-   # ABLATION: attention-only LoRA (q/k/v/o) to bypass SGLang's experimental
-   # MoE-LoRA fused triton kernel, which corrupts rollout generation (word-salad)
-   # even with a no-op adapter. Base FP8 serves clean standalone; only the
-   # MoE-LoRA fused path differs. Matches the canonical multi_lora FP8 example.
-   # Revert to "gate_proj,up_proj,down_proj" to test MoE-LoRA once the kernel is fixed.
+   # CanonicalLoRA splits Q/K/V (and gate/up) into SEPARATE adapters, which
+   # SGLang fuses correctly — vs standard LoRA's fused qkv_proj, which SGLang's
+   # repeat(3,1) path misapplies for this gated-attention model (gibberish even
+   # with a no-op adapter). miles_plugins.megatron_bridge patches the canonical
+   # q adapter to be gate-aware (q_proj out = 2*n_heads*head_dim = 8192, not
+   # hidden 2048). Validated standalone: separate gate-correct q/k/v/o -> clean.
+   --lora-type canonical_lora
    --target-modules "q_proj,k_proj,v_proj,o_proj"   # attention projections
    --sglang-lora-backend triton
    --megatron-to-hf-mode bridge                      # required for LoRA path
