@@ -258,12 +258,18 @@ class UpdateWeightFromTensor:
             # block-FP8 weights (garbage rollouts). It is only needed when the base
             # was re-synced with raw weights; when base sync is skipped the base is
             # the clean disk-loaded (already-processed) copy, so do not re-process it.
-            if not skip_base_sync:
-                post_process_weights(
-                    rollout_engines=self.rollout_engines,
-                    restore_weights_before_load=False,
-                    post_process_quantization=True,
-                )
+            #
+            # The call itself must STILL be issued though: it is a scheduler
+            # round-trip that drains the engine's request queue, guaranteeing the
+            # async load_lora_adapter_from_tensors finished before the trainer frees
+            # its CUDA-IPC source tensors. Skipping the whole call races that handoff
+            # (rebuild_cuda_tensor: invalid argument). So keep it as a barrier and
+            # only gate the destructive re-quant.
+            post_process_weights(
+                rollout_engines=self.rollout_engines,
+                restore_weights_before_load=False,
+                post_process_quantization=not skip_base_sync,
+            )
             ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
 
