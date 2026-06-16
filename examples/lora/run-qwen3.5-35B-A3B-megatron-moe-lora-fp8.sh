@@ -50,14 +50,14 @@ LORA_ARGS=(
    --lora-rank 32                    # LoRA rank
    --lora-alpha 32                   # LoRA alpha (= rank for RL)
    --lora-dropout 0.0                # 0 for RL
-   # CanonicalLoRA splits Q/K/V (and gate/up) into SEPARATE adapters, which
-   # SGLang fuses correctly — vs standard LoRA's fused qkv_proj, which SGLang's
-   # repeat(3,1) path misapplies for this gated-attention model (gibberish even
-   # with a no-op adapter). miles_plugins.megatron_bridge patches the canonical
-   # q adapter to be gate-aware (q_proj out = 2*n_heads*head_dim = 8192, not
-   # hidden 2048). Validated standalone: separate gate-correct q/k/v/o -> clean.
-   --lora-type canonical_lora
-   --target-modules "q_proj,k_proj,v_proj,o_proj"   # attention projections
+   # o_proj-only: linear_proj is RowParallel, UNFUSED and UNGATED — the one
+   # attention projection with no qkv-fusion / gated-q geometry games that
+   # corrupt the q/k/v and MoE-expert LoRA paths on this Qwen3.5 gated model.
+   # Validated standalone (separate o_proj adapter applies clean). Goal: confirm
+   # coherent rollouts + reward signal end-to-end on the FP8 pipeline. Expand to
+   # q/k/v/MoE once SGLang's gated qkv-LoRA buffer sizing is fixed upstream.
+   --lora-type lora
+   --target-modules "o_proj"
    --sglang-lora-backend triton
    --megatron-to-hf-mode bridge                      # required for LoRA path
 )
