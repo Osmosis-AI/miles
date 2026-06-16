@@ -252,14 +252,18 @@ class UpdateWeightFromTensor:
         dist.barrier(group=get_gloo_group())
 
         if rank == 0:
-            # `post_process_quantization` is related to the `process_weights_after_loading`
-            # in the sglang rollout side, which should always be invoked after weight
-            # updating.
-            post_process_weights(
-                rollout_engines=self.rollout_engines,
-                restore_weights_before_load=False,
-                post_process_quantization=True,
-            )
+            # post_process_quantization re-runs SGLang's process_weights_after_loading
+            # over ALL modules. That step (transpose/repack/scale for FP8) is NOT
+            # idempotent — re-running it on the already-prepared base corrupts the
+            # block-FP8 weights (garbage rollouts). It is only needed when the base
+            # was re-synced with raw weights; when base sync is skipped the base is
+            # the clean disk-loaded (already-processed) copy, so do not re-process it.
+            if not skip_base_sync:
+                post_process_weights(
+                    rollout_engines=self.rollout_engines,
+                    restore_weights_before_load=False,
+                    post_process_quantization=True,
+                )
             ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
 
