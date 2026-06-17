@@ -177,6 +177,7 @@ SGLANG_ARGS=(
    --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256)
    --sglang-max-running-requests 512
    --sglang-moe-runner-backend triton
+   --sglang-enable-weights-cpu-backup
 )
 
 MISC_ARGS=(
