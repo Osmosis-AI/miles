@@ -1,4 +1,5 @@
 import logging
+import os
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
@@ -198,8 +199,13 @@ class UpdateWeightFromTensor:
 
         megatron_local_weights = self.weights_getter()
 
-        # For LoRA+distributed: base weights are frozen, skip after first round.
-        if not (self.is_lora and self.use_distribute and self._lora_base_synced):
+        # LoRA base is frozen and SGLang serves it from the FP8 checkpoint, so the
+        # per-round base re-export is redundant. MILES_SKIP_BASE_SYNC extends the
+        # existing distributed-LoRA base skip to colocate; only adapters sync.
+        skip_base_sync = (self.is_lora and self.use_distribute and self._lora_base_synced) or (
+            (self.is_lora or self.is_multi_lora) and os.environ.get("MILES_SKIP_BASE_SYNC") == "1"
+        )
+        if not skip_base_sync:
             base_ctx = nullcontext()
             if self.is_multi_lora:
                 # For multi_lora, hide the multi-adapter layer entirely so it doesn't
@@ -242,13 +248,10 @@ class UpdateWeightFromTensor:
         dist.barrier(group=get_gloo_group())
 
         if rank == 0:
-            # `post_process_quantization` is related to the `process_weights_after_loading`
-            # in the sglang rollout side, which should always be invoked after weight
-            # updating.
             post_process_weights(
                 rollout_engines=self.rollout_engines,
                 restore_weights_before_load=False,
-                post_process_quantization=True,
+                post_process_quantization=not skip_base_sync,
             )
             ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
@@ -418,19 +421,18 @@ def _send_to_colocated_engine(
             if lora_loaded:
                 ray.get(ipc_engine.unload_lora_adapter.remote(lora_name=lora_name))
 
-            # (Yusheng) to-do-1: update lora weights from tensors should support multiple dtypes (bf16, fp8, fp16, fp32)
-            # currently, we only support 1 type. If there are multiple dtypes, we need to serialize the tensors for each dtype.
-            # Thus, we need to apply the same way as `ipc_engine.update_weights_from_tensor` in future
-            # (Yusheng) to-do-2: need to add ci test acc here - now it will pass but fail to update lora weights
-
-            refs.append(
-                ipc_engine.load_lora_adapter_from_tensors.remote(
-                    lora_name=lora_name,
-                    config_dict=lora_config,
-                    serialized_tensors=serialized_named_tensors[0][0],
-                    load_format="flattened_bucket",
+            # Loop the dtype index (rank-replicated, so rank stays [0]); SGLang merges
+            # successive loads under the same lora_name into one adapter.
+            num_dtypes = len(serialized_named_tensors[0])
+            for i in range(num_dtypes):
+                refs.append(
+                    ipc_engine.load_lora_adapter_from_tensors.remote(
+                        lora_name=lora_name,
+                        config_dict=lora_config,
+                        serialized_tensors=serialized_named_tensors[0][i],
+                        load_format="flattened_bucket",
+                    )
                 )
-            )
 
         else:
             num_dtypes = len(serialized_named_tensors[0])
