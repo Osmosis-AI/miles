@@ -50,14 +50,10 @@ LORA_ARGS=(
    --lora-rank 32                    # LoRA rank
    --lora-alpha 32                   # LoRA alpha (= rank for RL)
    --lora-dropout 0.0                # 0 for RL
-   # o_proj-only: linear_proj is RowParallel, UNFUSED and UNGATED — the one
-   # attention projection with no qkv-fusion / gated-q geometry games that
-   # corrupt the q/k/v and MoE-expert LoRA paths on this Qwen3.5 gated model.
-   # Validated standalone (separate o_proj adapter applies clean). Goal: confirm
-   # coherent rollouts + reward signal end-to-end on the FP8 pipeline. Expand to
-   # q/k/v/MoE once SGLang's gated qkv-LoRA buffer sizing is fixed upstream.
-   --lora-type lora
-   --target-modules "o_proj"
+   # canonical_lora exports separate q/k/v so SGLang applies them unfused;
+   # gated_canonical_lora sizes the gated q adapter to 8192 (query+gate).
+   --lora-type canonical_lora
+   --target-modules "q_proj,k_proj,v_proj,o_proj"
    --sglang-lora-backend triton
    --megatron-to-hf-mode bridge                      # required for LoRA path
 )
