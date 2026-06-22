@@ -198,18 +198,28 @@ def get_log_probs_and_entropy_from_hidden_states(
     entropy_chunks = []
     for start in range(0, num_tokens, seq_chunk_size):
         end = min(start + seq_chunk_size, num_tokens)
-        logits_chunk = projection.linear(hidden_states[start:end]).float().contiguous()
-        if rollout_temperature != 1.0:
-            logits_chunk = logits_chunk / rollout_temperature
-        log_prob_chunk, entropy_chunk = calculate_log_probs_and_entropy(
-            logits_chunk,
-            full_tokens[start:end],
-            tp_group,
-            with_entropy=with_entropy,
-            chunk_size=-1,
-            true_on_policy=False,
-            need_entropy_grad=with_entropy,
-        )
+        if projection.use_fused_kernel:
+            log_prob_chunk, entropy_chunk = projection.fused_selected_logprob(
+                hidden_states[start:end],
+                full_tokens[start:end],
+                tp_group=tp_group,
+                rollout_temperature=rollout_temperature,
+                with_entropy=with_entropy,
+                need_entropy_grad=with_entropy,
+            )
+        else:
+            logits_chunk = projection.linear(hidden_states[start:end]).float().contiguous()
+            if rollout_temperature != 1.0:
+                logits_chunk = logits_chunk / rollout_temperature
+            log_prob_chunk, entropy_chunk = calculate_log_probs_and_entropy(
+                logits_chunk,
+                full_tokens[start:end],
+                tp_group,
+                with_entropy=with_entropy,
+                chunk_size=-1,
+                true_on_policy=False,
+                need_entropy_grad=with_entropy,
+            )
         log_prob_chunks.append(log_prob_chunk.reshape(-1))
         if with_entropy:
             entropy_chunks.append(entropy_chunk.reshape(-1))

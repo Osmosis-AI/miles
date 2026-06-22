@@ -36,6 +36,10 @@ def validate_chunked_tp_logprob_config(args: Namespace) -> None:
             "--use-chunked-tp-logprob-loss requires --chunked-tp-logprob-seq-chunk-size > 0. "
             f"Got: {args.chunked_tp_logprob_seq_chunk_size}"
         )
+    if getattr(args, "use_fused_tp_logprob_kernel", False) and not args.use_chunked_tp_logprob_loss:
+        raise ValueError(
+            "--use-fused-tp-logprob-kernel requires --use-chunked-tp-logprob-loss to be set."
+        )
 
 
 class ActorOutputProjection:
@@ -52,6 +56,9 @@ class ActorOutputProjection:
         self.has_weight_arg = False
         self.weight_param_index: int | None = None
         self.runtime_weight: torch.Tensor | None = None
+        self.weight: torch.Tensor | None = None
+        self.bias: torch.Tensor | None = None
+        self.use_fused_kernel = False
 
     @classmethod
     def install_on(cls, model: torch.nn.Module | Sequence[torch.nn.Module]) -> ActorOutputProjection | None:
@@ -79,6 +86,8 @@ class ActorOutputProjection:
             self.has_runtime_gather_arg = "runtime_gather_output" in signature.parameters
             self.has_weight_arg = "weight" in signature.parameters
             self.weight_param_index = params.index("weight") - 1 if self.has_weight_arg else None
+            self.weight = getattr(output_layer, "weight", None)
+            self.bias = getattr(output_layer, "bias", None)
 
         adapter = self
 
@@ -134,6 +143,30 @@ class ActorOutputProjection:
             output = output[0]
         return output
 
+    def fused_selected_logprob(
+        self,
+        hidden_states: torch.Tensor,
+        tokens: torch.Tensor,
+        *,
+        tp_group,
+        rollout_temperature: float,
+        with_entropy: bool,
+        need_entropy_grad: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        from miles.backends.megatron_utils.kernels.selected_tp_logprob_triton import fused_selected_tp_logprob
+
+        weight = self.runtime_weight if self.runtime_weight is not None else self.weight
+        return fused_selected_tp_logprob(
+            hidden_states,
+            weight,
+            self.bias,
+            tokens,
+            tp_group,
+            rollout_temperature,
+            with_entropy,
+            need_entropy_grad,
+        )
+
 
 def setup_chunked_tp_logprob(model: torch.nn.Module | Sequence[torch.nn.Module], args: Namespace, role: str) -> None:
     if not should_enable_chunked_tp_logprob(args, role):
@@ -146,4 +179,5 @@ def setup_chunked_tp_logprob(model: torch.nn.Module | Sequence[torch.nn.Module],
                 "Requested --use-chunked-tp-logprob-loss, but no actor output_layer was found on this rank."
             )
         return
+    projection.use_fused_kernel = bool(getattr(args, "use_fused_tp_logprob_kernel", False))
     args.actor_projection = projection
