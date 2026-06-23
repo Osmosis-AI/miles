@@ -1,7 +1,17 @@
 #!/bin/bash
 
-# Qwen3.5-35B-A3B GRPO with block-wise FP8 (e4m3) base + o_proj LoRA, colocate.
+# Qwen3.5-35B-A3B MoE LoRA + block-wise FP8 training (Hopper / Blackwell).
+#
+# Combines:
+#   - LoRA on MoE expert projections (gate_proj, up_proj, down_proj)
+#   - SGLang triton LoRA backend (required for MoE LoRA)
+#   - Megatron-Bridge HF conversion (required for LoRA path)
+#   - Block-wise FP8 e4m3 forward, BF16 backward + master weights
+#   - --use-tis for MoE numerical drift compensation
+#
+# See docs/superpowers/plans/2026-06-08-fp8-moe-lora-02-fp8-moe-lora-bringup.md.
 
+# for rerun the task
 pkill -9 sglang
 sleep 3
 ray stop --force
@@ -12,6 +22,8 @@ pkill -9 ray
 pkill -9 python
 
 set -ex
+
+# will prevent ray from buffering stdout/stderr
 export PYTHONBUFFERED=16
 
 NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
@@ -20,25 +32,30 @@ if [ "$NVLINK_COUNT" -gt 0 ]; then
 else
     HAS_NVLINK=0
 fi
+echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
 
 source "/root/miles/scripts/models/qwen3.5-35B-A3B.sh"
 
 CKPT_ARGS=(
-   # Bridge-load the base from HF; --ref-load (torch_dist) crashes on this
-   # hybrid-GDN model's _extra_state.
+   # Bridge mode loads the base model from --hf-checkpoint via Megatron-Bridge.
+   # No --ref-load: a torch_dist load routes through Megatron dist_checkpointing,
+   # which crashes on this hybrid-GDN model's _extra_state
+   # (_replace_sharded_keys_with_state_dict_keys: "BytesIO has no len()"),
+   # regardless of which image built the torch_dist. The canonical MoE-LoRA
+   # bridge recipe (run-gpt-oss-20B-megatron-moe-lora.sh) loads from HF instead.
    --hf-checkpoint /root/Qwen3.5-35B-A3B-FP8
 )
 
 LORA_ARGS=(
-   --lora-rank 32
-   --lora-alpha 32
-   --lora-dropout 0.0
-   # o_proj is the one unfused/ungated attention projection; q/k/v/MoE targets
-   # need the gated qkv-LoRA buffer fix upstream in SGLang.
-   --lora-type lora
-   --target-modules "o_proj"
+   --lora-rank 32                    # LoRA rank
+   --lora-alpha 32                   # LoRA alpha (= rank for RL)
+   --lora-dropout 0.0                # 0 for RL
+   # canonical_lora exports separate q/k/v so SGLang applies them unfused;
+   # gated_canonical_lora sizes the gated q adapter to 8192 (query+gate).
+   --lora-type canonical_lora
+   --target-modules "q_proj,k_proj,v_proj,o_proj"
    --sglang-lora-backend triton
-   --megatron-to-hf-mode bridge
+   --megatron-to-hf-mode bridge                      # required for LoRA path
 )
 
 ROLLOUT_ARGS=(
@@ -51,8 +68,10 @@ ROLLOUT_ARGS=(
    --num-rollout 3000
    --rollout-batch-size 32
    --n-samples-per-prompt 8
+   # 4096 avoids the fp32-logits train-step OOM at 8192 on colocated H200s.
    --rollout-max-response-len 4096
    --rollout-temperature 1
+
    --global-batch-size 256
    --balance-data
 )
@@ -78,13 +97,15 @@ PERF_ARGS=(
    --recompute-method uniform
    --recompute-num-layers 1
 
-   # GDN rejects packed sequences; bshd pads per-sequence (needs static batches).
+   # GDN rejects packed sequences; bshd pads per-sequence (needs static micro batches).
    --qkv-format bshd
    --micro-batch-size 1
 
+   # use deepep for megatron MoE
    --moe-enable-deepep
    --moe-token-dispatcher-type flex
 
+   # block-wise FP8
    --transformer-impl transformer_engine
    --bf16
    --fp8-format e4m3
@@ -98,7 +119,7 @@ GRPO_ARGS=(
    --entropy-coef 0.00
    --eps-clip 0.2
    --eps-clip-high 0.28
-   --use-tis
+   --use-tis                          # MoE precision-drift compensation
 )
 
 OPTIMIZER_ARGS=(
@@ -111,22 +132,26 @@ OPTIMIZER_ARGS=(
 )
 
 WANDB_ARGS=(
+   # --use-wandb
+   # --wandb-project miles-fp8-moe-lora
+   # --wandb-group qwen3.5-35B-A3B-fp8-moe-lora
+   # --wandb-key ${WANDB_KEY}
 )
 
 SGLANG_ARGS=(
-   # Block-FP8 [128,128] needs every sharded dim a multiple of 128, so the
-   # shared-expert MLP caps world-TP at 4 => 2 engines x 4 GPUs.
+   # Block-FP8 needs every sharded dim a multiple of 128. shared_expert=512 and
+   # moe_ffn=512 cap the per-engine TP at 4, so use 2 engines x 4 GPUs. ep=1
+   # avoids the MoE-LoRA align-kernel IMA on EP's -1 expert sentinels.
    --rollout-num-gpus-per-engine 4
    --sglang-mem-fraction-static 0.4
-   # ep=1 avoids the -1 non-local-expert sentinels that trip the MoE-LoRA align kernel.
    --sglang-ep-size 1
+   # Hybrid-GDN cuda-graph capture deadlocks under colocate; run eager.
    --sglang-disable-cuda-graph
    --sglang-dtype bfloat16
+
+   --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256)
    --sglang-max-running-requests 512
    --sglang-moe-runner-backend triton
-   # Preserve the FP8 base across the colocate torch_memory_saver release/resume:
-   # resume() discards weight content, and MILES_SKIP_BASE_SYNC keeps the base from
-   # being re-synced, so without this the base is corrupted (gibberish rollouts).
    --sglang-enable-weights-cpu-backup
 )
 
@@ -136,12 +161,15 @@ MISC_ARGS=(
    --accumulate-allreduce-grads-in-fp32
    --attention-softmax-in-fp32
    --attention-backend flash
-   --update-weight-buffer-size 536870912
+   --update-weight-buffer-size 536870912 # 512MB
 )
 
+# launch the master node of ray in container
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 8 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
+# NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 forces fp32 scales in fp8 training,
+# matching what sglang serves on the rollout side.
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"/root/Megatron-LM/\",

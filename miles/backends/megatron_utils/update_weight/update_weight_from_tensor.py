@@ -199,9 +199,9 @@ class UpdateWeightFromTensor:
 
         megatron_local_weights = self.weights_getter()
 
-        # LoRA base is frozen and SGLang serves it from the FP8 checkpoint, so the
-        # per-round base re-export is redundant. MILES_SKIP_BASE_SYNC extends the
-        # existing distributed-LoRA base skip to colocate; only adapters sync.
+        # LoRA base is frozen and SGLang serves it from the FP8 checkpoint; re-syncing
+        # it every round is redundant and re-quantization corrupts the block-FP8 weights.
+        # MILES_SKIP_BASE_SYNC extends the distributed skip to colocate; only adapters sync.
         skip_base_sync = (self.is_lora and self.use_distribute and self._lora_base_synced) or (
             (self.is_lora or self.is_multi_lora) and os.environ.get("MILES_SKIP_BASE_SYNC") == "1"
         )
@@ -248,6 +248,10 @@ class UpdateWeightFromTensor:
         dist.barrier(group=get_gloo_group())
 
         if rank == 0:
+            # process_weights_after_loading is not idempotent for block-FP8, so only
+            # re-quantize when the base was actually re-synced. The call itself is kept
+            # unconditionally: it drains the engine queue so the async adapter load
+            # finishes before the trainer frees its CUDA-IPC source tensors.
             post_process_weights(
                 rollout_engines=self.rollout_engines,
                 restore_weights_before_load=False,
@@ -421,8 +425,7 @@ def _send_to_colocated_engine(
             if lora_loaded:
                 ray.get(ipc_engine.unload_lora_adapter.remote(lora_name=lora_name))
 
-            # Loop the dtype index (rank-replicated, so rank stays [0]); SGLang merges
-            # successive loads under the same lora_name into one adapter.
+            # One load per dtype bucket; SGLang merges them server-side into one adapter.
             num_dtypes = len(serialized_named_tensors[0])
             for i in range(num_dtypes):
                 refs.append(

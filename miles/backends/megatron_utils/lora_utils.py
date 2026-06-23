@@ -249,6 +249,9 @@ def create_lora_instance(args: Namespace):
     Returns:
         A LoRA/CanonicalLoRA dataclass instance ready to be applied to a model.
     """
+    # Install gate-aware CanonicalLoRA.transform before the LoRA is built.
+    import miles_plugins.megatron_bridge  # noqa: F401
+
     from megatron.bridge.peft.canonical_lora import CanonicalLoRA
     from megatron.bridge.peft.lora import LoRA
 
