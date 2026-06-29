@@ -21,7 +21,7 @@ async def main(args):
 
     controller = create_multi_lora_controller(args)
     args.data_source_path = "miles.rollout.multi_lora_data_source.MultiLoRADataSource"
-    args.custom_generate_state_hooks_path = "miles.ray.multi_lora_controller.MultiLoRAHooks"
+    args.custom_generate_state_hooks_path = "miles.rollout.multi_lora_hooks.MultiLoRAHooks"
 
     # For cli adapters
     for name, path in args.multi_lora_adapters:
@@ -82,7 +82,9 @@ async def main(args):
     rollout_data_next_future = None
     while True:
         adapters = await controller.active_adapters.remote()
-        run_train = should_run_train(adapters)
+        # Also train when a one-step-off prefetch is pending, so a draining
+        # adapter's final rollout gets trained + reported (else it never DRAINS).
+        run_train = should_run_train(adapters) or rollout_data_next_future is not None
         update_adapters = should_update_adapters(adapters)
 
         if adapters:
@@ -93,9 +95,10 @@ async def main(args):
             if rollout_data_next_future is None:
                 rollout_data_next_future = rollout_manager.generate.remote(rollout_id)
             rollout_data_ref = await rollout_data_next_future
-            # rollout_data_ref = await rollout_manager.generate.remote(rollout_id)
             rollout_data_next_future = None
-            if not args.colocate:
+            adapters = await controller.active_adapters.remote()
+
+            if not args.colocate and should_run_train(adapters):
                 rollout_data_next_future = rollout_manager.generate.remote(rollout_id + 1)
             await offload_rollout()
 
