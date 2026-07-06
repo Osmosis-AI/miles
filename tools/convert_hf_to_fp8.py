@@ -162,6 +162,10 @@ def convert_fp8(input_path, output_path, strategy, block_size=None, max_workers=
     os.makedirs(output_path, exist_ok=True)
 
     for filename in os.listdir(input_path):
+        # Skip hidden files: workflow markers like a source-dir .done must not
+        # leak into the output and masquerade as this conversion's marker.
+        if filename.startswith("."):
+            continue
         if not filename.endswith(".safetensors") and not os.path.isdir(os.path.join(input_path, filename)):
             shutil.copyfile(os.path.join(input_path, filename), os.path.join(output_path, filename))
 
