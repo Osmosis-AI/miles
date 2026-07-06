@@ -129,6 +129,9 @@ def process_file(input_path, output_path, filename, strategy, block_size, result
     for key in weights.keys():
         if (
             "weight" in key
+            # Block/channel/tensor FP8 scales tile 2-D matrices; non-2D weights
+            # (e.g. GDN conv1d [dim, 1, k]) stay in the source dtype.
+            and weights[key].dim() == 2
             and "layernorm" not in key
             and "embed" not in key
             and "router" not in key
