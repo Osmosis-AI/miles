@@ -33,6 +33,7 @@ set -ex
 USE_FP8=${USE_FP8:-0}
 USE_CHUNKED=${USE_CHUNKED:-0}
 NUM_ROLLOUT=${NUM_ROLLOUT:-20}
+RESPONSE_LEN=${RESPONSE_LEN:-4096}
 
 mkdir -p "${OUT_DIR}/ckpts"
 
@@ -99,8 +100,11 @@ ROLLOUT_ARGS=(
    --num-rollout "${NUM_ROLLOUT}"
    --rollout-batch-size 32
    --n-samples-per-prompt 8
-   --rollout-max-response-len 4096
+   --rollout-max-response-len "${RESPONSE_LEN}"
    --rollout-temperature 1
+   # Length stress test: every response runs to the cap, giving a uniform
+   # max-length workload across all ablation runs.
+   --custom-generate-function-path miles.rollout.generate_hub.benchmarkers.generate_with_ignore_eos
 
    --global-batch-size 256
    --balance-data

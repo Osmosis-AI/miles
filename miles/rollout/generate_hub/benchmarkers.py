@@ -23,3 +23,10 @@ async def generate_with_random_osl(args: Namespace, sample: Sample, sampling_par
 
     logger.info(f"generate_with_random_osl {ans.response_length=}")
     return ans
+
+
+async def generate_with_ignore_eos(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample:
+    """Force every response to the configured max_new_tokens (length stress test)."""
+    modified_sampling_params = deepcopy(sampling_params)
+    modified_sampling_params["ignore_eos"] = True
+    return await _generate_base(args, sample, modified_sampling_params)
