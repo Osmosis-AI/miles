@@ -126,12 +126,24 @@ def process_file(input_path, output_path, filename, strategy, block_size, result
             weights[k] = f.get_tensor(k)
 
     modules_to_not_convert = []
+
+    def is_quantizable(tensor):
+        # FP8 scales tile 2-D matrices; non-2D weights (e.g. GDN conv1d
+        # [dim, 1, k]) stay in the source dtype. For block quantization,
+        # serving engines shard weights across TP and require every
+        # partition to be a block multiple, so dims that don't divide by
+        # the block (e.g. GDN in_proj_a/in_proj_b with output dim 32)
+        # also stay unquantized.
+        if tensor.dim() != 2:
+            return False
+        if block_size:
+            return all(dim % bs == 0 for dim, bs in zip(tensor.shape, block_size))
+        return True
+
     for key in weights.keys():
         if (
             "weight" in key
-            # Block/channel/tensor FP8 scales tile 2-D matrices; non-2D weights
-            # (e.g. GDN conv1d [dim, 1, k]) stay in the source dtype.
-            and weights[key].dim() == 2
+            and is_quantizable(weights[key])
             and "layernorm" not in key
             and "embed" not in key
             and "router" not in key
