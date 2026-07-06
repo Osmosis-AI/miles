@@ -37,9 +37,7 @@ def validate_chunked_tp_logprob_config(args: Namespace) -> None:
             f"Got: {args.chunked_tp_logprob_seq_chunk_size}"
         )
     if getattr(args, "use_fused_tp_logprob_kernel", False) and not args.use_chunked_tp_logprob_loss:
-        raise ValueError(
-            "--use-fused-tp-logprob-kernel requires --use-chunked-tp-logprob-loss to be set."
-        )
+        raise ValueError("--use-fused-tp-logprob-kernel requires --use-chunked-tp-logprob-loss to be set.")
 
 
 class ActorOutputProjection:
@@ -180,4 +178,6 @@ def setup_chunked_tp_logprob(model: torch.nn.Module | Sequence[torch.nn.Module],
             )
         return
     projection.use_fused_kernel = bool(getattr(args, "use_fused_tp_logprob_kernel", False))
+    if projection.use_fused_kernel:
+        logger.info("fused selected-TP-logprob kernel enabled")
     args.actor_projection = projection
