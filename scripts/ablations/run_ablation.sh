@@ -123,12 +123,13 @@ PERF_ARGS=(
    # TP2 shards the vocab dimension of the loss-path logits: at 12k response
    # length the grad-entropy path holds ~4 full-vocab fp32 copies for
    # backward (~45 GB at TP1), which OOMed both non-chunked runs. TP2 halves
-   # every one of them. EP drops to 4 so TP x EP still covers the node.
+   # every one of them. EP stays 8 (ETP1, expert-DP=1: ETPxEPxEDP = TPxCPxDP
+   # = 8) -- 32 experts/rank, ~8 GB less weight memory than EP4.
    --tensor-model-parallel-size 2
    --sequence-parallel
    --pipeline-model-parallel-size 1
    --context-parallel-size 1
-   --expert-model-parallel-size 4
+   --expert-model-parallel-size 8
    --expert-tensor-parallel-size 1
 
    --recompute-granularity full
