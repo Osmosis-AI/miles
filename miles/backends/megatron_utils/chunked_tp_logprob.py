@@ -8,7 +8,6 @@ from collections.abc import Sequence
 
 import torch
 from megatron.core import mpu, tensor_parallel
-from megatron.core.utils import get_attr_wrapped_model
 
 logger = logging.getLogger(__name__)
 
@@ -58,13 +57,24 @@ class ActorOutputProjection:
         self.bias: torch.Tensor | None = None
         self.use_fused_kernel = False
 
+    @staticmethod
+    def find_output_layer(chunk: torch.nn.Module) -> torch.nn.Module | None:
+        model = chunk
+        while hasattr(model, "module"):
+            model = model.module
+        # VLM-wrapped models (e.g. Qwen3.5) nest the GPTModel under
+        # language_model; get_attr_wrapped_model only unwraps .module chains
+        # and raises when the attribute is absent on the wrapper.
+        model = getattr(model, "language_model", model)
+        return getattr(model, "output_layer", None)
+
     @classmethod
     def install_on(cls, model: torch.nn.Module | Sequence[torch.nn.Module]) -> ActorOutputProjection | None:
         chunks = model if isinstance(model, (list, tuple)) else [model]
         adapter: ActorOutputProjection | None = None
         patched = 0
         for chunk in chunks:
-            output_layer = get_attr_wrapped_model(chunk, "output_layer", allow_none=True)
+            output_layer = cls.find_output_layer(chunk)
             if output_layer is None:
                 continue
             if adapter is None:
