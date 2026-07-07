@@ -27,9 +27,12 @@ def interleave_qkv_gated(self, query, key, value):
     """
     config = self.to_wrap.config
     head_dim = config.kv_channels
-    num_kv = config.num_query_groups
-    q_per_group = config.num_attention_heads // num_kv
     gate = 2 if getattr(config, "attention_output_gate", False) else 1
+    # The adapter outputs are TP-partitioned (ColumnParallelLinear,
+    # gather_output=False), so group/head counts must come from the local
+    # tensor shapes, not the global config.
+    num_kv = key.shape[-1] // head_dim
+    q_per_group = query.shape[-1] // (num_kv * gate * head_dim)
     lead = query.shape[:-1]
     q = (
         query.reshape(*lead, num_kv, q_per_group, gate, head_dim)
@@ -97,7 +100,9 @@ def _patched_transform(self, m, name=None, prefix=None):
             adapter_k = cl.ParallelLinearAdapter(attrs.in_features, kv_out_features, **adapter_kwargs)
         if "linear_v" in canonical_submodules:
             adapter_v = cl.ParallelLinearAdapter(attrs.in_features, kv_out_features, **adapter_kwargs)
-        return cl.LoRALinearSplitQKV(m, cl.ModuleDict({"adapter_q": adapter_q, "adapter_k": adapter_k, "adapter_v": adapter_v}))
+        return cl.LoRALinearSplitQKV(
+            m, cl.ModuleDict({"adapter_q": adapter_q, "adapter_k": adapter_k, "adapter_v": adapter_v})
+        )
 
     if name == "linear_fc1":
         adapter_up = adapter_gate = None
