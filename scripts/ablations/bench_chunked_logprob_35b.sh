@@ -88,7 +88,14 @@ ROLLOUT_ARGS=(
    --global-batch-size 32
 )
 
-EVAL_ARGS=(--skip-eval-before-train --eval-interval 9999)
+EVAL_ARGS=(
+   --skip-eval-before-train
+   --eval-interval 9999
+   --eval-prompt-data aime /root/dapo-math-17k/dapo-math-17k.jsonl
+   --n-samples-per-eval-prompt 1
+   --eval-max-response-len 8000
+   --eval-top-p 1
+)
 
 PERF_ARGS=(
    --tensor-model-parallel-size "${TP_SIZE}"
