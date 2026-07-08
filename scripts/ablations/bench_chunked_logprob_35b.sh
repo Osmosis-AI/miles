@@ -23,7 +23,11 @@ NUM_ROLLOUT="${NUM_ROLLOUT:-10}"
 RESPONSE_LEN="${RESPONSE_LEN:-12288}"
 TP_SIZE="${TP_SIZE:-2}"
 OUT_ROOT="${OUT_ROOT:-/weka/ablations/qwen3-5-35b-logprob-bench}"
-HF_CKPT="${HF_CKPT:-/weka/Qwen3.5-35B-A3B}"   # REAL weights (not randomized)
+# Randomized weights (our methodology): the logprob kernel's time/memory depend
+# on seq-len/vocab/batch/topology, not on weight values, so random weights are a
+# clean, deterministic benchmark. Rewards are therefore zero -> entropy-coef
+# 1e-4 + observe-training-entropy is the gradient source (see GRPO_ARGS).
+HF_CKPT="${HF_CKPT:-/weka/ablations/qwen3-5-35b-matrix/models/Qwen3.5-35B-A3B-rand-bf16}"
 
 mkdir -p "${OUT_ROOT}"
 
@@ -101,13 +105,16 @@ PERF_ARGS=(
    --moe-token-dispatcher-type flex
 )
 
-# Real weights => real rewards => standard GRPO. entropy-coef 0 (blog); no ref
-# model, so kl-loss-coef 0 (kl term is perf-neutral for the logprob compare).
+# Random weights => zero rewards, so entropy is the only gradient source and
+# must be differentiable through the logprob path (this is what exercises the
+# kernel's backward). Identical across all three variants, so the comparison
+# stays fair. no ref model => kl-loss-coef 0.
 GRPO_ARGS=(
    --advantage-estimator grpo
    --kl-loss-coef 0.00
    --kl-loss-type low_var_kl
-   --entropy-coef 0.00
+   --entropy-coef 1e-4
+   --observe-training-entropy
    --eps-clip 0.2
    --eps-clip-high 0.28
 )
