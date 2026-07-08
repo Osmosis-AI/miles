@@ -3,6 +3,8 @@ from argparse import Namespace
 from collections.abc import Callable
 from copy import deepcopy
 
+import torch
+
 from miles.utils import tracking_utils
 from miles.utils.metric_utils import compute_rollout_step
 from miles.utils.timer import Timer
@@ -21,6 +23,17 @@ def log_perf_data_raw(
         return
 
     log_dict = {f"perf/{key}_time": val for key, val in log_dict_raw.items()}
+
+    # Peak (high-water) GPU memory over the step, then reset for the next step.
+    # This is the quantity the chunked TP logprob path shrinks (the transient
+    # [seq, vocab] logits tensor); the miles port dropped it from the slime-rl
+    # perf logger. Matches slime/utils/train_metric_utils.py.
+    if torch.cuda.is_available():
+        device = torch.cuda.current_device()
+        log_dict["memory/peak_allocated_gb"] = round(torch.cuda.max_memory_allocated(device) / (1024**3), 2)
+        log_dict["memory/current_allocated_gb"] = round(torch.cuda.memory_allocated(device) / (1024**3), 2)
+        log_dict["memory/reserved_gb"] = round(torch.cuda.memory_reserved(device) / (1024**3), 2)
+        torch.cuda.reset_peak_memory_stats(device)
 
     if ("perf/actor_train_time" in log_dict) and (compute_total_fwd_flops is not None):
         total_fwd_flops = compute_total_fwd_flops(seq_lens=timer_instance.seq_lens)
