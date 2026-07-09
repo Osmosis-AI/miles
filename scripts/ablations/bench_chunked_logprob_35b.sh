@@ -152,6 +152,7 @@ SGLANG_ARGS=(
 
 PRECISION_ARGS=(--transformer-impl transformer_engine --bf16)
 [ "${USE_FP8}" = "1" ] && PRECISION_ARGS+=(--fp8-format e4m3 --fp8-recipe blockwise)
+[ "${USE_FP8}" = "1" ] && [ "${FP8_PARAM_GATHER:-0}" = "1" ] && PRECISION_ARGS+=(--fp8-param-gather)
 
 MISC_ARGS=(
    --attention-dropout 0.0
