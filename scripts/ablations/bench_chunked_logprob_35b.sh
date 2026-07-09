@@ -23,11 +23,14 @@ NUM_ROLLOUT="${NUM_ROLLOUT:-10}"
 RESPONSE_LEN="${RESPONSE_LEN:-12288}"
 TP_SIZE="${TP_SIZE:-2}"
 OUT_ROOT="${OUT_ROOT:-/weka/ablations/qwen3-5-35b-logprob-bench}"
-# Randomized weights (our methodology): the logprob kernel's time/memory depend
-# on seq-len/vocab/batch/topology, not on weight values, so random weights are a
-# clean, deterministic benchmark. Rewards are therefore zero -> entropy-coef
-# 1e-4 + observe-training-entropy is the gradient source (see GRPO_ARGS).
-HF_CKPT="${HF_CKPT:-/weka/ablations/qwen3-5-35b-matrix/models/Qwen3.5-35B-A3B-rand-bf16}"
+USE_FP8="${USE_FP8:-0}"
+if [ "${USE_FP8}" = "1" ]; then
+    HF_CKPT="${HF_CKPT:-/weka/ablations/qwen3-5-35b-matrix/models/Qwen3.5-35B-A3B-rand-fp8}"
+    LABEL_PREFIX="fp8_"
+else
+    HF_CKPT="${HF_CKPT:-/weka/ablations/qwen3-5-35b-matrix/models/Qwen3.5-35B-A3B-rand-bf16}"
+    LABEL_PREFIX=""
+fi
 
 mkdir -p "${OUT_ROOT}"
 
@@ -148,6 +151,7 @@ SGLANG_ARGS=(
 )
 
 PRECISION_ARGS=(--transformer-impl transformer_engine --bf16)
+[ "${USE_FP8}" = "1" ] && PRECISION_ARGS+=(--fp8-format e4m3 --fp8-recipe blockwise)
 
 MISC_ARGS=(
    --attention-dropout 0.0
@@ -195,15 +199,12 @@ run_variant() {
     return 0
 }
 
-# Blog A/B: materialize-then-chunk baseline vs hidden-state chunked (512) vs
-# fused Triton kernel (128). --log-probs-chunk-size only bounds the baseline.
-run_variant "baseline" --log-probs-chunk-size 4096
-run_variant "chunked512" --use-chunked-tp-logprob-loss --chunked-tp-logprob-seq-chunk-size 512
-run_variant "fused128" --use-chunked-tp-logprob-loss --chunked-tp-logprob-seq-chunk-size 128 --use-fused-tp-logprob-kernel
+run_variant "${LABEL_PREFIX}baseline" --log-probs-chunk-size 4096
+run_variant "${LABEL_PREFIX}chunked512" --use-chunked-tp-logprob-loss --chunked-tp-logprob-seq-chunk-size 512
 
 echo ""
-echo "===== RESULTS SUMMARY (tp=${TP_SIZE} len=${RESPONSE_LEN}) ====="
-for label in baseline chunked512 fused128; do
+echo "===== RESULTS SUMMARY (fp8=${USE_FP8} tp=${TP_SIZE} len=${RESPONSE_LEN}) ====="
+for label in "${LABEL_PREFIX}baseline" "${LABEL_PREFIX}chunked512"; do
     echo "--- ${label} ---"
     grep -aoE "perf [0-9]+: \{.*" "${OUT_ROOT}/${label}.log" 2>/dev/null | tail -1 \
       | grep -aoE "'(perf/log_probs_time|perf/actor_train_time|perf/step_time|memory/peak_allocated_gb|memory/reserved_gb)': [0-9.]+" \
