@@ -110,6 +110,13 @@ def get_model_provider_func(
             provider.moe_router_bias_update_rate = args.moe_router_bias_update_rate
         if getattr(args, "moe_aux_loss_coeff", None) is not None:
             provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff
+        # AutoBridge derives the provider from the HF config only, so Megatron's fp8
+        # flags are dead here unless forwarded. fp8/fp8_recipe enable FP8 GEMM autocast;
+        # fp8_param stores params as FP8 (TE fp8_model_init at layer construction) —
+        # without it the base stays BF16 and FP8 yields no weight-memory savings.
+        provider.fp8 = args.fp8
+        provider.fp8_recipe = args.fp8_recipe
+        provider.fp8_param = args.fp8_param_gather
         provider.finalize()
 
         def wrapped_bridge_provider(

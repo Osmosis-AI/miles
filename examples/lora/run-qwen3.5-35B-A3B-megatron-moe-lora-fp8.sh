@@ -6,7 +6,7 @@
 #   - LoRA on MoE expert projections (gate_proj, up_proj, down_proj)
 #   - SGLang triton LoRA backend (required for MoE LoRA)
 #   - Megatron-Bridge HF conversion (required for LoRA path)
-#   - Block-wise FP8 e4m3 forward, BF16 backward + master weights
+#   - Block-wise FP8 e4m3 forward + FP8 param storage (--fp8-param-gather), BF16 backward
 #   - --use-tis for MoE numerical drift compensation
 #
 # See docs/superpowers/plans/2026-06-08-fp8-moe-lora-02-fp8-moe-lora-bringup.md.
@@ -113,11 +113,15 @@ PERF_ARGS=(
    --moe-enable-deepep
    --moe-token-dispatcher-type flex
 
-   # block-wise FP8
+   # block-wise FP8; --fp8-param-gather stores params natively FP8 (the weight-memory
+   # win — without it FP8 is GEMM-autocast only and the base stays BF16). Needs the
+   # distributed optimizer (always on in miles). Keep dispatcher=flex: alltoall +
+   # blockwise + fp8-param-gather crashes on Hopper (Megatron-LM #1863).
    --transformer-impl transformer_engine
    --bf16
    --fp8-format e4m3
    --fp8-recipe blockwise
+   --fp8-param-gather
 )
 
 GRPO_ARGS=(
