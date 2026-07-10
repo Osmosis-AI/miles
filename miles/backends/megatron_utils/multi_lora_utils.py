@@ -239,7 +239,7 @@ def _register_adapter(adapter: RegisteredAdapter, model) -> None:
     """Install one PENDING adapter on this rank's local model shard."""
     from megatron.bridge.peft.multi_lora_layers import init_adapter_slot, load_adapter
 
-    from miles.backends.megatron_utils.initialize import is_megatron_main_rank
+    from miles.backends.megatron_utils.initialize import is_first_replica_megatron_main_rank
 
     name = adapter.name
     config = adapter.config
@@ -249,7 +249,7 @@ def _register_adapter(adapter: RegisteredAdapter, model) -> None:
     ckpt_root = config.save / "checkpoints"
     ckpt, step = find_latest_checkpoint(ckpt_root)
 
-    if is_megatron_main_rank():
+    if is_first_replica_megatron_main_rank():
         ray.get(get_multi_lora_controller().set_train_step.remote(name, step))
 
     if ckpt is None:
@@ -294,7 +294,7 @@ def _deregister_adapter(adapter: RegisteredAdapter, args, model, optimizer) -> N
 
 
 def load_pending_adapters(args, model, optimizer) -> int:
-    from miles.backends.megatron_utils.initialize import is_megatron_main_rank
+    from miles.backends.megatron_utils.initialize import is_first_replica_megatron_main_rank
     from miles.utils.adapter_config import AdapterState
     from miles.utils.distributed_utils import get_gloo_group
 
@@ -310,7 +310,7 @@ def load_pending_adapters(args, model, optimizer) -> int:
     if dist.is_initialized():
         dist.barrier(group=get_gloo_group())
 
-    if is_megatron_main_rank():
+    if is_first_replica_megatron_main_rank():
         for name in pending:
             ray.get(get_multi_lora_controller().update_adapter_state.remote(name, AdapterState.RUNNING))
     optimizer.reload_model_params()
@@ -319,7 +319,7 @@ def load_pending_adapters(args, model, optimizer) -> int:
 
 def unload_drained_adapters(args, model, optimizer) -> int:
     """DRAINED adapters model-side cleanup."""
-    from miles.backends.megatron_utils.initialize import is_megatron_main_rank
+    from miles.backends.megatron_utils.initialize import is_first_replica_megatron_main_rank
     from miles.utils.adapter_config import AdapterState
     from miles.utils.distributed_utils import get_gloo_group
 
@@ -332,7 +332,7 @@ def unload_drained_adapters(args, model, optimizer) -> int:
         _deregister_adapter(adapter, args, model, optimizer)
     if dist.is_initialized():
         dist.barrier(group=get_gloo_group())
-    if is_megatron_main_rank():
+    if is_first_replica_megatron_main_rank():
         for name in drained:
             ray.get(get_multi_lora_controller().mark_removed.remote(name))
     return len(drained)

@@ -61,13 +61,10 @@ class UpdateWeightP2P(DistBucketedWeightUpdateMixin):
         self.quantization_config = quantization_config
         self.weight_version = 0
         self._model_update_groups = None
-        self._init_lora(
-            args=args,
-            model=model,
-            model_name=model_name,
-            quantization_config=quantization_config,
-            is_lora=is_lora,
-        )
+        self.rollout_engines: Sequence[ActorHandle] | None = None
+        self._connection_stale: bool = False
+        assert not is_lora, "LoRA weight sync is not supported for p2p (RDMA) weight transfer."
+        self.is_lora = False
 
         self.transfer_plan = RemoteTransferPlan(args, model)
         self.global_rank = dist.get_rank(group=get_gloo_group())
@@ -101,10 +98,6 @@ class UpdateWeightP2P(DistBucketedWeightUpdateMixin):
 
         """
         return self.transfer_plan._gathered_dp_rank < self.transfer_plan._rollout_num_gpus
-
-    @property
-    def _is_lora_source(self) -> bool:
-        raise NotImplementedError("LoRA weight sync is not yet supported for p2p (RDMA) weight transfer.")
 
     def _gather_and_update_expert_weights(self, update_bucket_weight_func, pbar=None):
         """Wait for all background P2P writes to complete here."""
@@ -182,6 +175,13 @@ class UpdateWeightP2P(DistBucketedWeightUpdateMixin):
 
         converted_named_tensors.clear()
 
+    # TODO: avoid dup code during yueming's refactor (temp write this to avoid introducing potentially conflicting base class)
+    def is_rollout_engines_fresh(self) -> bool:
+        return self.rollout_engines is not None and not self._connection_stale
+
+    def mark_engine_connection_stale(self) -> None:
+        self._connection_stale = True
+
     def connect_rollout_engines(
         self,
         rollout_engines: Sequence[ActorHandle],
@@ -203,6 +203,11 @@ class UpdateWeightP2P(DistBucketedWeightUpdateMixin):
         self.rollout_engine_lock = rollout_engine_lock
 
         if self._is_source:
+            # A reconnect builds a new transfer engine and new pinned buffers. Force
+            # memory registration to run against those new objects instead of
+            # reusing stale pointers from the previous connection.
+            self._model_registered = False
+            self._weight_memory_registry = {}
             self._group_name = f"miles-p2p_{self.transfer_plan._gathered_dp_rank}"
             targets = self.transfer_plan.plan_p2p()
             (
@@ -255,8 +260,7 @@ class UpdateWeightP2P(DistBucketedWeightUpdateMixin):
 
                 self._transfer_engine_meta_list.append((model_replica, remote_infos))
 
-    def _update_lora_weight_implementation(self, named_tensors: list[tuple[str, torch.Tensor]]) -> None:
-        raise NotImplementedError("LoRA weight sync is not yet supported for p2p (RDMA) weight transfer.")
+        self._connection_stale = False
 
     def _create_cpu_replica(
         self,
