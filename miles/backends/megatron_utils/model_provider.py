@@ -127,7 +127,16 @@ def get_model_provider_func(
             pg_collection=None,
         ) -> GPTModel:
             assert config is None, "miles builds the config from args, so it expects config to be None"
-            return provider.provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
+            build_ctx, build_ctx_args = nullcontext, {}
+            if args.fp8_param_gather:
+                from transformer_engine.pytorch import fp8_model_init
+
+                build_ctx = fp8_model_init
+                build_ctx_args["enabled"] = True
+                if "preserve_high_precision_init_val" in inspect.signature(fp8_model_init).parameters:
+                    build_ctx_args["preserve_high_precision_init_val"] = True
+            with build_ctx(**build_ctx_args):
+                return provider.provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
 
         return wrapped_bridge_provider
 
