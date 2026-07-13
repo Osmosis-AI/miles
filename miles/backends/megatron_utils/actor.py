@@ -152,9 +152,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 return source
             from miles.backends.megatron_utils.fp8_frozen_base import frozen_fp8_param_ids
 
-            # The frozen base lives as fp8 buffers; its bf16 param.data is transient
-            # (materialized by the forward pre-hook, freed at offload), so it must not
-            # be backed up or restored.
+            # the fp8-stored base's bf16 param.data is transient — never back up/restore it
             skip = frozen_fp8_param_ids(self.model)
             return ((name, tensor) for name, tensor in source if id(tensor) not in skip)
 
@@ -218,7 +216,7 @@ class MegatronTrainRayActor(TrainRayActor):
         if not self.args.offload_train:
             return
 
-        if getattr(self.args, "fp8_frozen_base_store", False):
+        if self.args.fp8_frozen_base_store:
             from miles.backends.megatron_utils.fp8_frozen_base import free_frozen_base
 
             free_frozen_base(self.model)
