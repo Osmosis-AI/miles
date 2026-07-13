@@ -141,13 +141,25 @@ class MegatronTrainRayActor(TrainRayActor):
 
         start_rollout_id = loaded_rollout_id + 1
 
-        self.weights_backuper = TensorBackuper.create(
-            source_getter=lambda: named_params_and_buffers(
+        def backup_source():
+            source = named_params_and_buffers(
                 self.args,
                 self.model,
                 convert_to_global_name=args.megatron_to_hf_mode == "raw",
                 translate_gpu_to_cpu=not self.args.enable_weights_backuper,
-            ),
+            )
+            if not self.args.fp8_frozen_base_store:
+                return source
+            from miles.backends.megatron_utils.fp8_frozen_base import frozen_fp8_param_ids
+
+            # The frozen base lives as fp8 buffers; its bf16 param.data is transient
+            # (materialized by the forward pre-hook, freed at offload), so it must not
+            # be backed up or restored.
+            skip = frozen_fp8_param_ids(self.model)
+            return ((name, tensor) for name, tensor in source if id(tensor) not in skip)
+
+        self.weights_backuper = TensorBackuper.create(
+            source_getter=backup_source,
             single_tag=None if args.enable_weights_backuper else "actor",
         )
         self._active_model_tag: str | None = "actor"

@@ -33,6 +33,9 @@ LINEAR_SUBSTR = (
     "linear_attn.in_proj_qkv",
     "linear_attn.in_proj_z",
     "linear_attn.out_proj",
+    # bridge-built GDN layers keep the GatedDeltaNet module at self_attention
+    "self_attention.in_proj",
+    "self_attention.out_proj",
 )
 
 
@@ -58,7 +61,7 @@ def family(name: str) -> str:
         return "moe_experts"
     if "shared_experts" in name:
         return "shared_experts"
-    if "linear_attn" in name:
+    if "linear_attn" in name or "self_attention.in_proj" in name or "self_attention.out_proj" in name:
         return "gdn"
     if "self_attention" in name:
         return "attention"
@@ -79,6 +82,15 @@ def install_fp8_hooks(module: torch.nn.Module) -> None:
             param.data = weight_dequant(q, s, BLOCK).to(dtype).reshape(shape)
 
     module.register_forward_pre_hook(pre)
+
+
+def frozen_fp8_param_ids(model_chunks) -> set[int]:
+    return {
+        id(param)
+        for chunk in model_chunks
+        for module in chunk.modules()
+        for param, _, _ in getattr(module, "fp8_frozen_entries", {}).values()
+    }
 
 
 def free_frozen_base(model_chunks) -> None:
