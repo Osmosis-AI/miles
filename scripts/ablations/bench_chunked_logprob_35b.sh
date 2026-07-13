@@ -49,7 +49,7 @@ export PYTHONBUFFERED=16
 NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
 [ "${NVLINK_COUNT}" -gt 0 ] && HAS_NVLINK=1 || HAS_NVLINK=0
 
-source "/root/miles/scripts/models/qwen3.5-35B-A3B.sh"
+source "${MODEL_SCRIPT:-/root/miles/scripts/models/qwen3.5-35B-A3B.sh}"
 
 # Sequence parallel is only valid when the vocab is TP-sharded.
 SP_ARGS=()
