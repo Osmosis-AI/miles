@@ -110,6 +110,7 @@ PERF_ARGS=(
    --bf16
    --fp8-format e4m3
    --fp8-recipe blockwise
+   --fp8-frozen-base-store
 )
 
 GRPO_ARGS=(
