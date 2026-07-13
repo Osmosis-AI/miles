@@ -71,14 +71,12 @@ def family(name: str) -> str:
 
 
 def install_fp8_hooks(module: torch.nn.Module) -> None:
-    # Materialize the bf16 weight before every forward. It is NOT freed after the
-    # forward: TE grouped-expert backward reads self.weight directly, and under
-    # activation recompute the recomputed forward + its backward straddle a free.
-    # The transient bf16 is released together at offload time (free_frozen_base).
+    # No post-forward free: TE grouped backward and activation recompute read self.weight
+    # after the forward, so the bf16 stays until free_frozen_base at offload.
     def pre(mod, inputs):
         for leaf, (param, shape, dtype) in mod.fp8_frozen_entries.items():
-            q = getattr(mod, f"fp8q_{leaf}").contiguous()
-            s = getattr(mod, f"fp8s_{leaf}").contiguous()
+            q = getattr(mod, f"fp8q_{leaf}")
+            s = getattr(mod, f"fp8s_{leaf}")
             param.data = weight_dequant(q, s, BLOCK).to(dtype).reshape(shape)
 
     module.register_forward_pre_hook(pre)
@@ -94,9 +92,7 @@ def frozen_fp8_param_ids(model_chunks) -> set[int]:
 
 
 def free_frozen_base(model_chunks) -> None:
-    """Drop the transient bf16 base weights so the offloaded/resident footprint is
-    the fp8 buffers. Call after the training step's backward (e.g. before offload).
-    The forward pre-hook re-materializes them on the next step."""
+    """Drop the transient bf16 base so only the fp8 buffers stay resident; call post-backward."""
     for chunk in model_chunks:
         for module in chunk.modules():
             entries = getattr(module, "fp8_frozen_entries", None)

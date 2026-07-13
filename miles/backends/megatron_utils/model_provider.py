@@ -111,12 +111,9 @@ def get_model_provider_func(
         if getattr(args, "moe_aux_loss_coeff", None) is not None:
             provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff
         # AutoBridge derives the provider from the HF config only, so Megatron's fp8
-        # flags are dead here unless forwarded. fp8/fp8_recipe enable FP8 GEMM autocast;
-        # fp8_param stores params as FP8 (TE fp8_model_init at layer construction) —
-        # without it the base stays BF16 and FP8 yields no weight-memory savings.
+        # GEMM-autocast flags are dead here unless forwarded.
         provider.fp8 = args.fp8
         provider.fp8_recipe = args.fp8_recipe
-        provider.fp8_param = args.fp8_param_gather
         provider.finalize()
 
         def wrapped_bridge_provider(
@@ -127,16 +124,7 @@ def get_model_provider_func(
             pg_collection=None,
         ) -> GPTModel:
             assert config is None, "miles builds the config from args, so it expects config to be None"
-            build_ctx, build_ctx_args = nullcontext, {}
-            if args.fp8_param_gather:
-                from transformer_engine.pytorch import fp8_model_init
-
-                build_ctx = fp8_model_init
-                build_ctx_args["enabled"] = True
-                if "preserve_high_precision_init_val" in inspect.signature(fp8_model_init).parameters:
-                    build_ctx_args["preserve_high_precision_init_val"] = True
-            with build_ctx(**build_ctx_args):
-                return provider.provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
+            return provider.provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
 
         return wrapped_bridge_provider
 
