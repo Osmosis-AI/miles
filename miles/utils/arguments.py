@@ -236,6 +236,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--fp8-frozen-base-store",
+                action="store_true",
+                default=False,
+                help=(
+                    "Post-checkpoint: store the frozen LoRA base linear weights as block-fp8 "
+                    "(dequant per layer in the forward) to halve resident base weight memory."
+                ),
+            )
+            parser.add_argument(
                 "--allgather-cp",
                 action="store_true",
                 default=False,
