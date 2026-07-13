@@ -119,8 +119,8 @@ class MegatronTrainRayActor(TrainRayActor):
                 initialize_multi_lora_model_and_optimizer(args, role)
             )
         else:
-            (self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id) = (
-                initialize_model_and_optimizer(args, role)
+            (self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id) = initialize_model_and_optimizer(
+                args, role
             )
 
         parallel_state = get_parallel_state()
@@ -206,6 +206,10 @@ class MegatronTrainRayActor(TrainRayActor):
         if not self.args.offload_train:
             return
 
+        if getattr(self.args, "fp8_frozen_base_store", False):
+            from miles.backends.megatron_utils.fp8_frozen_base import free_frozen_base
+
+            free_frozen_base(self.model)
         clear_memory(clear_host_memory=True)
         print_memory("before offload model")
         destroy_process_groups()
@@ -485,6 +489,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         from miles.ray.multi_lora_controller import get_multi_lora_controller
         from miles.utils.adapter_config import AdapterState
+
         configs = ray.get(get_multi_lora_controller().adapter_configs.remote())
         if not any(c.state == AdapterState.PENDING for c in configs.values()):
             return 0
@@ -493,6 +498,7 @@ class MegatronTrainRayActor(TrainRayActor):
         #     self.wake_up()
 
         from .update_weight.multi_lora_sync import load_pending_adapters
+
         n = load_pending_adapters(self.args, self.model, self.optimizer)
         if n > 0:
             # Re-snapshot: init_adapter_slot + load_adapter mutated the model,
@@ -511,12 +517,14 @@ class MegatronTrainRayActor(TrainRayActor):
             return 0
         from miles.ray.multi_lora_controller import get_multi_lora_controller
         from miles.utils.adapter_config import AdapterState
+
         configs = ray.get(get_multi_lora_controller().adapter_configs.remote())
         if not any(c.state == AdapterState.DRAINED for c in configs.values()):
             return 0
         # if self.args.offload_train:
         #     self.wake_up()
         from .update_weight.multi_lora_sync import unload_drained_adapters
+
         n = unload_drained_adapters(self.args, self.model, self.optimizer, rollout_id)
         if n > 0:
             self.weights_backuper.backup("actor")

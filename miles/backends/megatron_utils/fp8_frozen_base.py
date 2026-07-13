@@ -68,22 +68,30 @@ def family(name: str) -> str:
 
 
 def install_fp8_hooks(module: torch.nn.Module) -> None:
+    # Materialize the bf16 weight before every forward. It is NOT freed after the
+    # forward: TE grouped-expert backward reads self.weight directly, and under
+    # activation recompute the recomputed forward + its backward straddle a free.
+    # The transient bf16 is released together at offload time (free_frozen_base).
     def pre(mod, inputs):
         for leaf, (param, shape, dtype) in mod.fp8_frozen_entries.items():
             q = getattr(mod, f"fp8q_{leaf}").contiguous()
             s = getattr(mod, f"fp8s_{leaf}").contiguous()
             param.data = weight_dequant(q, s, BLOCK).to(dtype).reshape(shape)
 
-    def post(mod, inputs, output):
-        # Free the transient bf16. Correct because the base is frozen (no wgrad)
-        # and TE fp8 / activation-recompute keeps whatever backward needs; for a
-        # plain layer the autograd graph still holds its own saved copy.
-        for leaf, (param, shape, dtype) in mod.fp8_frozen_entries.items():
-            param.data = torch.empty(0, dtype=dtype, device=param.data.device)
-        return output
-
     module.register_forward_pre_hook(pre)
-    module.register_forward_hook(post)
+
+
+def free_frozen_base(model_chunks) -> None:
+    """Drop the transient bf16 base weights so the offloaded/resident footprint is
+    the fp8 buffers. Call after the training step's backward (e.g. before offload).
+    The forward pre-hook re-materializes them on the next step."""
+    for chunk in model_chunks:
+        for module in chunk.modules():
+            entries = getattr(module, "fp8_frozen_entries", None)
+            if not entries:
+                continue
+            for leaf, (param, shape, dtype) in entries.items():
+                param.data = torch.empty(0, dtype=dtype, device=param.data.device)
 
 
 def quantize_frozen_base_to_fp8(model_chunks, args) -> None:
