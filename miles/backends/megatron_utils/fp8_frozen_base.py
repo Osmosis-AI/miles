@@ -10,6 +10,11 @@ from tools.fp8_cast_bf16 import weight_dequant
 
 logger = logging.getLogger(__name__)
 
+# TODO: per-layer-free leaks ~14 GB/step at 122B (retained across free_entries +
+#       gc); memory-snapshot diagnostic in flight — fix before enabling by default.
+# TODO: TE-native fp8 params (Float8BlockScaling) so GEMMs consume the stored fp8
+#       directly and the bf16 copy never exists.
+
 BLOCK = 128
 
 # Frozen base linear weights to store as block-fp8 (mirrors the export-side
