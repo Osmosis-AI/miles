@@ -70,16 +70,39 @@ def family(name: str) -> str:
     return "other"
 
 
-def install_fp8_hooks(module: torch.nn.Module) -> None:
-    # No post-forward free: TE grouped backward and activation recompute read self.weight
-    # after the forward, so the bf16 stays until free_frozen_base at offload.
+def install_fp8_hooks(module: torch.nn.Module, per_layer_free: bool) -> None:
     def pre(mod, inputs):
         for leaf, (param, shape, dtype) in mod.fp8_frozen_entries.items():
+            if param.data.numel():
+                continue
             q = getattr(mod, f"fp8q_{leaf}")
             s = getattr(mod, f"fp8s_{leaf}")
             param.data = weight_dequant(q, s, BLOCK).to(dtype).reshape(shape)
 
     module.register_forward_pre_hook(pre)
+
+    if not per_layer_free:
+        # bf16 stays until free_frozen_base at offload: TE grouped backward and
+        # activation recompute read self.weight after the forward.
+        return
+
+    def free_entries(mod):
+        for leaf, (param, shape, dtype) in mod.fp8_frozen_entries.items():
+            param.data = torch.empty(0, dtype=dtype, device=param.data.device)
+
+    def post(mod, inputs, output):
+        # Under no_grad (checkpointed outer forward, forward-only logprob) nothing
+        # holds the weight for backward — the recompute pre-hook re-materializes it.
+        # Under grad (recompute replay, non-checkpointed) the backward still reads
+        # it, so free only once dgrad has reached the module inputs.
+        if not torch.is_grad_enabled():
+            free_entries(mod)
+            return
+        grad_inputs = [t for t in inputs if isinstance(t, torch.Tensor) and t.requires_grad]
+        if grad_inputs:
+            torch.autograd.graph.register_multi_grad_hook(grad_inputs, lambda grads: free_entries(mod))
+
+    module.register_forward_hook(post)
 
 
 def frozen_fp8_param_ids(model_chunks) -> set[int]:
@@ -134,7 +157,7 @@ def quantize_frozen_base_to_fp8(model_chunks, args) -> None:
 
             if entries:
                 module.fp8_frozen_entries = entries
-                install_fp8_hooks(module)
+                install_fp8_hooks(module, args.fp8_frozen_base_per_layer_free)
 
     if rank0():
         logger.info(

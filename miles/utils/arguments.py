@@ -245,6 +245,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--fp8-frozen-base-per-layer-free",
+                action="store_true",
+                default=False,
+                help=(
+                    "With --fp8-frozen-base-store: free each module's dequantized bf16 as soon "
+                    "as the step no longer needs it (post-forward under no_grad, post-dgrad "
+                    "otherwise) so train peak drops by ~the base size instead of holding it."
+                ),
+            )
+            parser.add_argument(
                 "--allgather-cp",
                 action="store_true",
                 default=False,
