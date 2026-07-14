@@ -22,6 +22,8 @@ set -x
 NUM_ROLLOUT="${NUM_ROLLOUT:-10}"
 RESPONSE_LEN="${RESPONSE_LEN:-12288}"
 TP_SIZE="${TP_SIZE:-2}"
+EP_SIZE="${EP_SIZE:-8}"
+NUM_NODES="${NUM_NODES:-1}"
 OUT_ROOT="${OUT_ROOT:-/weka/ablations/qwen3-5-35b-logprob-bench}"
 USE_FP8="${USE_FP8:-0}"
 if [ "${USE_FP8}" = "1" ]; then
@@ -104,7 +106,7 @@ PERF_ARGS=(
    --tensor-model-parallel-size "${TP_SIZE}"
    --pipeline-model-parallel-size 1
    --context-parallel-size 1
-   --expert-model-parallel-size 8
+   --expert-model-parallel-size "${EP_SIZE}"
    --expert-tensor-parallel-size 1
    --recompute-granularity full
    --recompute-method uniform
@@ -139,7 +141,7 @@ OPTIMIZER_ARGS=(
 )
 
 SGLANG_ARGS=(
-   --rollout-num-gpus-per-engine 4
+   --rollout-num-gpus-per-engine "${SGLANG_GPUS_PER_ENGINE:-4}"
    --sglang-mem-fraction-static 0.4
    --sglang-ep-size 1
    --sglang-disable-cuda-graph
@@ -183,11 +185,19 @@ run_variant() {
     cleanup
     ray start --head --node-ip-address "${MASTER_ADDR}" --num-gpus 8 \
         --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+    if [ "${NUM_NODES}" -gt 1 ]; then
+        for i in $(seq 1 120); do
+            alive=$(python3 -c "import ray; ray.init(address='auto', ignore_reinit_error=True); print(sum(1 for n in ray.nodes() if n['Alive']))" 2>/dev/null | tail -1 || echo 0)
+            echo "ray nodes alive: ${alive}/${NUM_NODES} (attempt ${i})"
+            [ "${alive}" -ge "${NUM_NODES}" ] && break
+            sleep 5
+        done
+    fi
     set +e
     ray job submit --address="http://127.0.0.1:8265" \
         --runtime-env-json="${RUNTIME_ENV_JSON}" \
         -- python3 train.py \
-        --actor-num-nodes 1 --actor-num-gpus-per-node 8 --colocate \
+        --actor-num-nodes "${NUM_NODES}" --actor-num-gpus-per-node 8 --colocate \
         "${MODEL_ARGS[@]}" "${CKPT_ARGS[@]}" "${PRECISION_ARGS[@]}" \
         "${ROLLOUT_ARGS[@]}" "${OPTIMIZER_ARGS[@]}" "${GRPO_ARGS[@]}" \
         "${PERF_ARGS[@]}" "${SP_ARGS[@]}" "${LORA_ARGS[@]}" "${EVAL_ARGS[@]}" \
