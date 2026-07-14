@@ -167,6 +167,11 @@ MISC_ARGS=(
    --update-weight-buffer-size 536870912
    --calculate-per-token-loss
 )
+[ "${MEMORY_SNAPSHOT:-0}" = "1" ] && MISC_ARGS+=(
+   --record-memory-history
+   --memory-snapshot-dir "${OUT_ROOT}/memsnap"
+   --memory-snapshot-num-steps 2
+)
 
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 RUNTIME_ENV_JSON="{
