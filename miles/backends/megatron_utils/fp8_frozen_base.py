@@ -10,6 +10,11 @@ from tools.fp8_cast_bf16 import weight_dequant
 
 logger = logging.getLogger(__name__)
 
+# TODO: free the transient bf16 per layer during the step (peak win, ~base size at
+#       122B); blocked on stale-weight retention across re-materializations.
+# TODO: TE-native fp8 params (Float8BlockScaling) so GEMMs consume the stored fp8
+#       directly and the bf16 copy never exists.
+
 BLOCK = 128
 
 # Frozen base linear weights to store as block-fp8 (mirrors the export-side

@@ -9,7 +9,6 @@
 #   - Block-wise FP8 e4m3 forward, BF16 backward + master weights
 #   - --use-tis for MoE numerical drift compensation
 #
-# See docs/superpowers/plans/2026-06-08-fp8-moe-lora-02-fp8-moe-lora-bringup.md.
 
 # for rerun the task
 pkill -9 sglang
