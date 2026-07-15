@@ -110,6 +110,7 @@ PERF_ARGS=(
    --fp8-format e4m3
    --fp8-recipe blockwise
    --fp8-frozen-base-store
+   --fp8-frozen-base-per-layer-free
 )
 
 GRPO_ARGS=(
