@@ -10,8 +10,6 @@ from tools.fp8_cast_bf16 import weight_dequant
 
 logger = logging.getLogger(__name__)
 
-# TODO: per-layer-free leaks ~14 GB/step at 122B (retained across free_entries +
-#       gc); memory-snapshot diagnostic in flight — fix before enabling by default.
 # TODO: TE-native fp8 params (Float8BlockScaling) so GEMMs consume the stored fp8
 #       directly and the bf16 copy never exists.
 
@@ -98,14 +96,18 @@ def install_fp8_hooks(module: torch.nn.Module, per_layer_free: bool) -> None:
     def post(mod, inputs, output):
         # Under no_grad (checkpointed outer forward, forward-only logprob) nothing
         # holds the weight for backward — the recompute pre-hook re-materializes it.
-        # Under grad (recompute replay, non-checkpointed) the backward still reads
-        # it, so free only once dgrad has reached the module inputs.
+        # Under grad (recompute replay) free after the module's backward: TE forwards
+        # are a single autograd Function, so output.grad_fn is the node that reads the
+        # weight; its post-hook fires once dgrad is done (frozen base has no wgrad).
+        # NOTE: multi_grad_hook is unusable here — its closure holds the inputs'
+        # grad_fns from hooks inside the same graph, an uncollectible cycle that
+        # retained every microbatch graph (~14 GB/step).
         if not torch.is_grad_enabled():
             free_entries(mod)
             return
-        grad_inputs = [t for t in inputs if isinstance(t, torch.Tensor) and t.requires_grad]
-        if grad_inputs:
-            torch.autograd.graph.register_multi_grad_hook(grad_inputs, lambda grads: free_entries(mod))
+        out = output[0] if isinstance(output, tuple) else output
+        if isinstance(out, torch.Tensor) and out.grad_fn is not None:
+            out.grad_fn.register_hook(lambda grad_inputs, grad_outputs: free_entries(mod))
 
     module.register_forward_hook(post)
 
