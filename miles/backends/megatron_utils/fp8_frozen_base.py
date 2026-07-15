@@ -56,7 +56,7 @@ def is_base_linear_weight(name: str) -> bool:
 
 
 def should_quantize(name: str, param: torch.nn.Parameter) -> bool:
-    return param is not None and param.dim() == 2 and not param.requires_grad and is_base_linear_weight(name)
+    return param.dim() == 2 and not param.requires_grad and is_base_linear_weight(name)
 
 
 def family(name: str) -> str:
@@ -90,18 +90,15 @@ def install_fp8_hooks(module: torch.nn.Module, per_layer_free: bool) -> None:
         return
 
     def free_entries(mod):
-        for leaf, (param, shape, dtype) in mod.fp8_frozen_entries.items():
+        for param, _, dtype in mod.fp8_frozen_entries.values():
             param.data = torch.empty(0, dtype=dtype, device=param.data.device)
 
     def post(mod, inputs, output):
-        # Under no_grad (checkpointed outer forward, forward-only logprob) nothing
-        # holds the weight for backward — the recompute pre-hook re-materializes it.
-        # Under grad (recompute replay) free after the module's backward: TE forwards
-        # are a single autograd Function, so output.grad_fn is the node that reads the
-        # weight; its post-hook fires once dgrad is done (frozen base has no wgrad).
-        # NOTE: multi_grad_hook is unusable here — its closure holds the inputs'
-        # grad_fns from hooks inside the same graph, an uncollectible cycle that
-        # retained every microbatch graph (~14 GB/step).
+        # no_grad (checkpointed outer forward, forward-only): nothing saves the weight,
+        # free now — the pre-hook re-materializes on recompute. Under grad, free after
+        # the module's backward via its grad_fn post-hook (TE forward = one autograd
+        # Function; frozen base has no wgrad). multi_grad_hook cannot be used here:
+        # its closure↔graph reference cycle retains every microbatch graph.
         if not torch.is_grad_enabled():
             free_entries(mod)
             return
@@ -125,10 +122,7 @@ def free_frozen_base(model_chunks) -> None:
     """Drop the transient bf16 base so only the fp8 buffers stay resident; call post-backward."""
     for chunk in model_chunks:
         for module in chunk.modules():
-            entries = getattr(module, "fp8_frozen_entries", None)
-            if not entries:
-                continue
-            for leaf, (param, shape, dtype) in entries.items():
+            for param, _, dtype in getattr(module, "fp8_frozen_entries", {}).values():
                 param.data = torch.empty(0, dtype=dtype, device=param.data.device)
 
 
@@ -166,11 +160,11 @@ def quantize_frozen_base_to_fp8(model_chunks, args) -> None:
                 module.fp8_frozen_entries = entries
                 install_fp8_hooks(module, args.fp8_frozen_base_per_layer_free)
 
-    if rank0():
+    if rank0() and counts:
         logger.info(
-            "fp8 frozen base: quantized %d tensors %s, freed ~%.2f GB/rank, roundtrip_relerr=%s",
+            "fp8 frozen base: quantized %d tensors %s, freed ~%.2f GB/rank, roundtrip_relerr=%.2e",
             sum(counts.values()),
             counts,
             freed_bytes / (1024**3),
-            f"{roundtrip_relerr:.2e}" if roundtrip_relerr is not None else "n/a",
+            roundtrip_relerr,
         )
