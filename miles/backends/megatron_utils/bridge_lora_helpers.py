@@ -93,6 +93,11 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
     provider.sequence_parallel = args.sequence_parallel
     provider.virtual_pipeline_model_parallel_size = args.virtual_pipeline_model_parallel_size
     provider.context_parallel_size = args.context_parallel_size
+    provider.recompute_granularity = args.recompute_granularity
+    provider.recompute_method = args.recompute_method
+    provider.recompute_num_layers = args.recompute_num_layers
+    provider.recompute_modules = args.recompute_modules
+    provider.distribute_saved_activations = args.distribute_saved_activations
     provider.variable_seq_lengths = True
     provider.moe_token_dispatcher_type = "alltoall"
     provider.moe_router_load_balancing_type = "none"
