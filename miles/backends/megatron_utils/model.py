@@ -868,6 +868,10 @@ def initialize_model_and_optimizer(
             checkpointing_context={},
             skip_load_to_model_and_opt=False,
         )
+    if args.fp8_frozen_base_store:
+        from miles.backends.megatron_utils.fp8_frozen_base import quantize_frozen_base_to_fp8
+
+        quantize_frozen_base_to_fp8(model, args)
     check_peak_gpu_memory_after_load(args)
     clear_memory()
 
