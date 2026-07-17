@@ -75,3 +75,10 @@ try:
     from . import nemotron_h  # noqa: F401
 except Exception as _e:  # pragma: no cover - defensive
     logger.warning("miles nemotron_h plugin failed to load: %s", _e)
+
+try:
+    from . import gated_canonical_lora
+
+    gated_canonical_lora.install()
+except Exception as _e:  # pragma: no cover - defensive
+    logger.warning("miles gated_canonical_lora plugin failed to load: %s", _e)
