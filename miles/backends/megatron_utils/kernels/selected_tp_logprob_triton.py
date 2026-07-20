@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import torch
@@ -246,7 +245,9 @@ def _compute_forward_stats(
     partial_sum = torch.empty_like(partial_max)
     selected_local = torch.zeros((num_rows,), device=hidden_states.device, dtype=torch.float32)
     weighted_sum = (
-        torch.empty_like(partial_max) if return_entropy else torch.empty((0,), device=hidden_states.device, dtype=torch.float32)
+        torch.empty_like(partial_max)
+        if return_entropy
+        else torch.empty((0,), device=hidden_states.device, dtype=torch.float32)
     )
 
     tp_rank, _tp_world_size = _get_tp_rank_and_world_size(tp_group)
@@ -352,7 +353,9 @@ class _FusedSelectedTPLogProbFunction(torch.autograd.Function):
         num_rows = hidden_states.size(0)
         if num_rows == 0:
             grad_hidden = (
-                hidden_states.new_zeros(hidden_states.shape, dtype=ctx.hidden_input_dtype) if need_hidden_grad else None
+                hidden_states.new_zeros(hidden_states.shape, dtype=ctx.hidden_input_dtype)
+                if need_hidden_grad
+                else None
             )
             grad_weight = torch.zeros_like(weight) if need_weight_grad else None
             grad_bias = torch.zeros_like(bias) if need_bias_grad else None
@@ -364,7 +367,9 @@ class _FusedSelectedTPLogProbFunction(torch.autograd.Function):
             return None, None, None, None, None, None, None, None
 
         grad_hidden = (
-            torch.zeros(hidden_states.shape, device=hidden_states.device, dtype=torch.float32) if need_hidden_grad else None
+            torch.zeros(hidden_states.shape, device=hidden_states.device, dtype=torch.float32)
+            if need_hidden_grad
+            else None
         )
         grad_weight = torch.empty_like(weight) if need_weight_grad else None
         grad_bias = torch.empty_like(bias) if need_bias_grad else None
@@ -405,9 +410,7 @@ class _FusedSelectedTPLogProbFunction(torch.autograd.Function):
                 grad_logits_tile[target_mask, local_targets[target_mask]] += grad_log_prob_scale[target_mask, 0]
 
             if grad_entropy_scale is not None:
-                grad_logits_tile.add_(
-                    probs_tile * grad_entropy_scale * (row_expected_scaled - scaled_logits_tile)
-                )
+                grad_logits_tile.add_(probs_tile * grad_entropy_scale * (row_expected_scaled - scaled_logits_tile))
 
             if grad_hidden is not None:
                 grad_hidden.add_(grad_logits_tile @ weight_tile.float())
