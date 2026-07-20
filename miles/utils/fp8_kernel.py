@@ -77,3 +77,37 @@ def blockwise_cast_to_fp8_triton(x: torch.Tensor, block_size=None) -> tuple[torc
         x, y, s, *x.stride(), *y.stride(), *s.stride(), M, N, 1e-10, fp8_min, fp8_max, **kwargs
     )
     return y, s
+
+
+@triton.jit
+def _weight_dequant_kernel(x_ptr, s_ptr, y_ptr, M, N, BLOCK_SIZE: tl.constexpr):
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
+    n = tl.cdiv(N, BLOCK_SIZE)
+    offs_m = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    offs_n = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    offs = offs_m[:, None] * N + offs_n[None, :]
+    mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    x = tl.load(x_ptr + offs, mask=mask).to(tl.float32)
+    s = tl.load(s_ptr + pid_m * n + pid_n)
+    y = x * s
+    tl.store(y_ptr + offs, y, mask=mask)
+
+
+def weight_dequant(
+    x: torch.Tensor,
+    s: torch.Tensor,
+    block_size: int = 128,
+    *,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    assert x.is_contiguous() and s.is_contiguous()
+    assert x.dim() == 2 and s.dim() == 2
+    M, N = x.size()
+    y = torch.empty_like(x, dtype=dtype or torch.get_default_dtype())
+
+    def grid(meta):
+        return (triton.cdiv(M, meta["BLOCK_SIZE"]), triton.cdiv(N, meta["BLOCK_SIZE"]))
+
+    _weight_dequant_kernel[grid](x, s, y, M, N, BLOCK_SIZE=block_size)
+    return y

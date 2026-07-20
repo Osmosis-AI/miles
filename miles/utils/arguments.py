@@ -322,6 +322,25 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=False,
             )
             parser.add_argument(
+                "--fp8-frozen-base-store",
+                action="store_true",
+                default=False,
+                help=(
+                    "Post-checkpoint: store the frozen LoRA base linear weights as block-fp8 "
+                    "(dequant per layer in the forward) to halve resident base weight memory."
+                ),
+            )
+            parser.add_argument(
+                "--fp8-frozen-base-per-layer-free",
+                action="store_true",
+                default=False,
+                help=(
+                    "With --fp8-frozen-base-store: free each module's dequantized bf16 as soon "
+                    "as the step no longer needs it (post-forward under no_grad, post-dgrad "
+                    "otherwise) so train peak drops by ~the base size instead of holding it."
+                ),
+            )
+            parser.add_argument(
                 "--allgather-cp",
                 action="store_true",
                 default=False,
@@ -2615,6 +2634,16 @@ def miles_validate_args(args):
         assert args.save is not None, "'--save' is required when custom_megatron_post_save_hook_path is set."
 
     # Parse LoRA target modules
+    if args.fp8_frozen_base_per_layer_free:
+        assert args.fp8_frozen_base_store, (
+            "--fp8-frozen-base-per-layer-free requires --fp8-frozen-base-store"
+        )
+    if args.fp8_frozen_base_store:
+        assert args.train_backend == "megatron", (
+            "--fp8-frozen-base-store is only supported by the Megatron training backend"
+        )
+        assert args.lora_rank > 0, "--fp8-frozen-base-store requires LoRA"
+
     if args.lora_rank > 0:
         assert args.target_modules is not None, "'--target-modules' is required when LoRA is enabled."
 

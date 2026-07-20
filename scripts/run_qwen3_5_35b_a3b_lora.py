@@ -90,6 +90,9 @@ class ScriptArgs(U.ExecuteTrainConfig):
     lora_base_cpu_backup: bool = True
     # MoE-expert LoRA layout: shared-outer when True, per-expert when False
     experts_shared_outer_loras: bool = True
+    # Store frozen base linear weights as block-FP8 between layer executions.
+    fp8_frozen_base_store: bool = False
+    fp8_frozen_base_per_layer_free: bool = True
 
     # rollout
     num_rollout: int = 10
@@ -162,6 +165,10 @@ def _train(args: ScriptArgs):
     lora_args += "--no-gradient-accumulation-fusion "
     if args.lora_base_cpu_backup:
         lora_args += "--lora-base-cpu-backup "
+    if args.fp8_frozen_base_store:
+        lora_args += "--fp8-frozen-base-store "
+        if args.fp8_frozen_base_per_layer_free:
+            lora_args += "--fp8-frozen-base-per-layer-free "
 
     rollout_args = (
         "--label-key label "

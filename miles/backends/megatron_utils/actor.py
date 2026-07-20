@@ -202,13 +202,23 @@ class MegatronTrainRayActor(TrainRayActor):
 
         start_rollout_id = loaded_rollout_id + 1
 
-        self.weights_backuper = TensorBackuper.create(
-            source_getter=lambda: named_params_and_buffers(
+        def backup_source():
+            source = named_params_and_buffers(
                 self.args,
                 self.model,
                 convert_to_global_name=args.megatron_to_hf_mode == "raw",
                 translate_gpu_to_cpu=not self.args.enable_weights_backuper,
-            ),
+            )
+            if not self.args.fp8_frozen_base_store:
+                return source
+            from miles.backends.megatron_utils.fp8_frozen_base import frozen_fp8_param_ids
+
+            # the fp8-stored base's bf16 param.data is transient — never back up/restore it
+            skip = frozen_fp8_param_ids(self.model)
+            return ((name, tensor) for name, tensor in source if id(tensor) not in skip)
+
+        self.weights_backuper = TensorBackuper.create(
+            source_getter=backup_source,
             single_tag=None if args.enable_weights_backuper else "actor",
         )
         self._active_model_tag: str | None = "actor"
@@ -281,6 +291,10 @@ class MegatronTrainRayActor(TrainRayActor):
     def sleep(self) -> None:
         assert self.args.offload_train
 
+        if self.args.fp8_frozen_base_store:
+            from miles.backends.megatron_utils.fp8_frozen_base import free_frozen_base
+
+            free_frozen_base(self.model)
         clear_memory(clear_host_memory=True)
         print_memory("before offload model")
         should_log_cpu_memory = is_first_replica_megatron_main_rank() and hasattr(self, "_last_rollout_id")
