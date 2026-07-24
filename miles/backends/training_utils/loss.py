@@ -73,7 +73,11 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
         values=values,
     )
 
-    # Apply on-policy distillation KL penalty to advantages (orthogonal to advantage estimator)
+    if args.normalize_advantages:
+        advantages = normalize_advantages(args, advantages, loss_masks, total_lengths, response_lengths, max_seq_lens)
+
+    # Keep OPD outside advantage whitening so masked teacher fallback positions
+    # remain strict no-ops.
     if args.use_opd:
         apply_opd_kl_to_advantages(
             args=args,
@@ -81,9 +85,6 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
             advantages=advantages,
             student_log_probs=log_probs,
         )
-
-    if args.normalize_advantages:
-        advantages = normalize_advantages(args, advantages, loss_masks, total_lengths, response_lengths, max_seq_lens)
 
     rollout_data["advantages"] = advantages
     rollout_data["returns"] = returns

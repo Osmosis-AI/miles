@@ -18,6 +18,11 @@ from miles.utils.misc import load_function
 
 logger = logging.getLogger(__name__)
 
+_CROSS_VOCAB_RM_PATH = "miles.rollout.on_policy_distillation.reward_func_cross_vocab"
+_CROSS_VOCAB_POST_PROCESS_PATH = (
+    "miles.rollout.on_policy_distillation.post_process_rewards_cross_vocab"
+)
+
 
 def reset_arg(parser, name, **kwargs):
     """
@@ -1211,6 +1216,58 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--opd-teacher-ckpt-step", type=int, default=None, help="The checkpoint step for OPD teacher model."
             )
+            parser.add_argument(
+                "--teacher-tokenizer-path",
+                type=str,
+                default=None,
+                help=(
+                    "Teacher tokenizer used by xToken-aligned cross-tokenizer SGLang OPD. "
+                    "Required by reward_func_cross_vocab."
+                ),
+            )
+            parser.add_argument(
+                "--opd-prompt-messages-key",
+                type=str,
+                default=None,
+                help=(
+                    "Metadata key used to preserve raw chat messages before applying the student chat template. "
+                    "The cross-tokenizer teacher renders these messages with its own chat template."
+                ),
+            )
+            parser.add_argument(
+                "--opd-mask-teacher-logprob-tokens",
+                type=str,
+                nargs="+",
+                default=None,
+                help=(
+                    "Student-tokenizer strings whose complete aligned chunks should receive zero cross-tokenizer "
+                    "OPD delta."
+                ),
+            )
+            parser.add_argument(
+                "--opd-teacher-timeout",
+                type=float,
+                default=300.0,
+                help="Total timeout in seconds for each SGLang OPD teacher request.",
+            )
+            parser.add_argument(
+                "--opd-teacher-retries",
+                type=int,
+                default=2,
+                help="Retries for transient SGLang OPD teacher failures before using a zero distillation delta.",
+            )
+            parser.add_argument(
+                "--opd-teacher-concurrency",
+                type=int,
+                default=0,
+                help="Maximum concurrent SGLang OPD teacher requests per rollout worker. 0 means unlimited.",
+            )
+            parser.add_argument(
+                "--opd-teacher-strict",
+                action="store_true",
+                default=False,
+                help="Fail the rollout after teacher retries are exhausted instead of using a zero OPD delta.",
+            )
             return parser
 
         def add_lora_arguments(parser):
@@ -2103,6 +2160,104 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
     return eval_datasets
 
 
+def _validate_opd_args(args) -> None:
+    uses_cross_vocab_reward = args.custom_rm_path == _CROSS_VOCAB_RM_PATH
+    uses_cross_vocab_post_process = args.custom_reward_post_process_path == _CROSS_VOCAB_POST_PROCESS_PATH
+    if uses_cross_vocab_reward != uses_cross_vocab_post_process:
+        raise ValueError(
+            "xToken-aligned cross-tokenizer OPD requires both reward_func_cross_vocab and "
+            "post_process_rewards_cross_vocab."
+        )
+
+    uses_cross_vocab_hooks = uses_cross_vocab_reward and uses_cross_vocab_post_process
+    if uses_cross_vocab_hooks and not args.use_opd:
+        raise ValueError("xToken-aligned cross-tokenizer hooks require --use-opd.")
+
+    if args.use_opd:
+        if args.opd_teacher_timeout <= 0:
+            raise ValueError("--opd-teacher-timeout must be positive.")
+        if args.opd_teacher_retries < 0:
+            raise ValueError("--opd-teacher-retries must be non-negative.")
+        if args.opd_teacher_concurrency < 0:
+            raise ValueError("--opd-teacher-concurrency must be non-negative.")
+
+        if args.opd_type is None:
+            raise ValueError("--opd-type must be specified when --use-opd is enabled. Choose 'sglang' or 'megatron'.")
+        if args.opd_log_prob_top_k < 0:
+            raise ValueError("--opd-log-prob-top-k must be non-negative.")
+        if uses_cross_vocab_hooks and args.opd_log_prob_top_k > 0:
+            raise ValueError(
+                "xToken-aligned cross-tokenizer OPD uses sampled-token log-probabilities and requires "
+                "--opd-log-prob-top-k=0."
+            )
+        if args.opd_log_prob_top_k > 0 and args.opd_type != "sglang":
+            raise ValueError("--opd-log-prob-top-k is currently supported only with --opd-type=sglang.")
+
+        if uses_cross_vocab_hooks:
+            if args.opd_type != "sglang":
+                raise ValueError("xToken-aligned cross-tokenizer OPD requires --opd-type=sglang.")
+            if not args.teacher_tokenizer_path:
+                raise ValueError("--teacher-tokenizer-path is required for xToken-aligned cross-tokenizer OPD.")
+            if getattr(args, "apply_chat_template", False) and not getattr(args, "opd_prompt_messages_key", None):
+                raise ValueError(
+                    "xToken-aligned cross-tokenizer OPD with --apply-chat-template requires "
+                    "--opd-prompt-messages-key so the teacher can render the raw messages."
+                )
+
+        if args.opd_type == "megatron":
+            if args.opd_teacher_load is None:
+                raise ValueError(
+                    "--opd-teacher-load is required when --opd-type=megatron. "
+                    "Please provide the path to the teacher model checkpoint."
+                )
+            if not os.path.exists(args.opd_teacher_load):
+                raise FileNotFoundError(
+                    f"opd_teacher_load {args.opd_teacher_load} does not exist, please check the path."
+                )
+            if not os.path.exists(os.path.join(args.opd_teacher_load, "latest_checkpointed_iteration.txt")):
+                logger.info(
+                    f"opd_teacher_load {args.opd_teacher_load} does not have latest_checkpointed_iteration.txt, "
+                    "please make sure it is a valid megatron checkpoint directory."
+                )
+
+        elif args.opd_type == "sglang" and args.opd_teacher_load is not None:
+            raise ValueError(
+                "--opd-teacher-load should not be set when --opd-type=sglang. "
+                "In sglang mode, teacher log-probs are obtained from external server during rollout."
+            )
+    elif args.opd_teacher_load is not None:
+        raise ValueError("--opd-teacher-load is set but --use-opd is not enabled. Please add --use-opd flag.")
+
+
+def _set_colocate_sglang_cuda_graph_defaults(args) -> None:
+    if hasattr(args, "sglang_cuda_graph_backend_prefill"):
+        if args.sglang_cuda_graph_backend_prefill is None:
+            args.sglang_cuda_graph_backend_prefill = "disabled"
+            logger.info(
+                "Colocate mode: defaulting --sglang-cuda-graph-backend-prefill=disabled to avoid NVLS OOM. "
+                "Set --sglang-cuda-graph-backend-prefill explicitly to override."
+            )
+        elif args.sglang_cuda_graph_backend_prefill != "disabled":
+            logger.warning(
+                f"Warning: colocate mode with --sglang-cuda-graph-backend-prefill="
+                f"{args.sglang_cuda_graph_backend_prefill} may trigger NVLS OOM."
+            )
+        return
+
+    # SGLang before cuda_graph_backend_prefill used piecewise CUDA graph
+    # controls for the same prefill path.
+    if getattr(args, "sglang_enforce_piecewise_cuda_graph", False):
+        logger.warning(
+            "Warning: colocate mode with --sglang-enforce-piecewise-cuda-graph may trigger NVLS OOM."
+        )
+    elif not getattr(args, "sglang_disable_piecewise_cuda_graph", False):
+        args.sglang_disable_piecewise_cuda_graph = True
+        logger.info(
+            "Colocate mode: defaulting --sglang-disable-piecewise-cuda-graph to avoid NVLS OOM. "
+            "Set --sglang-enforce-piecewise-cuda-graph explicitly to override."
+        )
+
+
 def miles_validate_args(args):
     args.eval_datasets = _resolve_eval_datasets(args)
 
@@ -2200,40 +2355,8 @@ def miles_validate_args(args):
                 "please make sure it is a valid megatron checkpoint directory."
             )
 
-    # Validate on-policy distillation (OPD) arguments
-    if args.use_opd:
-        if args.opd_type is None:
-            raise ValueError("--opd-type must be specified when --use-opd is enabled. Choose 'sglang' or 'megatron'.")
-        if args.opd_log_prob_top_k < 0:
-            raise ValueError("--opd-log-prob-top-k must be non-negative.")
-        if args.opd_log_prob_top_k > 0 and args.opd_type != "sglang":
-            raise ValueError("--opd-log-prob-top-k is currently supported only with --opd-type=sglang.")
-
-        if args.opd_type == "megatron":
-            if args.opd_teacher_load is None:
-                raise ValueError(
-                    "--opd-teacher-load is required when --opd-type=megatron. "
-                    "Please provide the path to the teacher model checkpoint."
-                )
-            if not os.path.exists(args.opd_teacher_load):
-                raise FileNotFoundError(
-                    f"opd_teacher_load {args.opd_teacher_load} does not exist, please check the path."
-                )
-            if not os.path.exists(os.path.join(args.opd_teacher_load, "latest_checkpointed_iteration.txt")):
-                logger.info(
-                    f"opd_teacher_load {args.opd_teacher_load} does not have latest_checkpointed_iteration.txt, "
-                    "please make sure it is a valid megatron checkpoint directory."
-                )
-
-        elif args.opd_type == "sglang":
-            if args.opd_teacher_load is not None:
-                raise ValueError(
-                    "--opd-teacher-load should not be set when --opd-type=sglang. "
-                    "In sglang mode, teacher log-probs are obtained from external server during rollout."
-                )
-    else:
-        if args.opd_teacher_load is not None:
-            raise ValueError("--opd-teacher-load is set but --use-opd is not enabled. Please add --use-opd flag.")
+    # Validate on-policy distillation (OPD) arguments.
+    _validate_opd_args(args)
 
     # TODO: During loading, we need to set the start_rollout_id here.
     if args.megatron_to_hf_mode == "bridge":
@@ -2411,17 +2534,7 @@ def miles_validate_args(args):
             args.offload_train = True
         if args.offload_rollout is None:
             args.offload_rollout = True
-        if args.sglang_cuda_graph_backend_prefill is None:
-            args.sglang_cuda_graph_backend_prefill = "disabled"
-            logger.info(
-                "Colocate mode: defaulting --sglang-cuda-graph-backend-prefill=disabled to avoid NVLS OOM. "
-                "Set --sglang-cuda-graph-backend-prefill explicitly to override."
-            )
-        elif args.sglang_cuda_graph_backend_prefill != "disabled":
-            logger.warning(
-                f"Warning: colocate mode with --sglang-cuda-graph-backend-prefill="
-                f"{args.sglang_cuda_graph_backend_prefill} may trigger NVLS OOM."
-            )
+        _set_colocate_sglang_cuda_graph_defaults(args)
         if args.rollout_num_gpus != args.actor_num_gpus_per_node * args.actor_num_nodes:
             logger.info(
                 f"rollout_num_gpus {args.rollout_num_gpus} != actor_num_gpus_per_node {args.actor_num_gpus_per_node} "
