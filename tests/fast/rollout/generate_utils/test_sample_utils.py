@@ -2,6 +2,7 @@ from unittest.mock import MagicMock
 
 import numpy
 import pytest
+import torch
 
 from miles.rollout.generate_utils.sample_utils import _merge_sample_pair, merge_samples
 from miles.utils.types import Sample
@@ -113,6 +114,46 @@ class TestMergeSamples:
 
         assert merged.loss_mask == [1, 0, 1]
         assert merged.rollout_log_probs == [0.0, 0.0, 0.0]
+
+    def test_opd_loss_mask_merges_with_zero_observation_span(self, mock_tokenizer):
+        a = make_sample(
+            tokens=[1, 2, 10],
+            response_length=1,
+            loss_mask=[1],
+            rollout_log_probs=[-0.1],
+        )
+        b = make_sample(
+            tokens=[1, 2, 10, 20, 30],
+            response_length=1,
+            loss_mask=[1],
+            rollout_log_probs=[-0.2],
+        )
+        a.opd_loss_mask = torch.tensor([1.0])
+        b.opd_loss_mask = torch.tensor([0.0])
+
+        merged = _merge_sample_pair(a, b, mock_tokenizer)
+
+        assert torch.equal(merged.opd_loss_mask, torch.tensor([1.0, 0.0, 0.0]))
+        merged.validate()
+
+    def test_missing_opd_loss_mask_defaults_to_enabled_response(self, mock_tokenizer):
+        a = make_sample(
+            tokens=[1, 2, 10],
+            response_length=1,
+            loss_mask=[1],
+            rollout_log_probs=[-0.1],
+        )
+        b = make_sample(
+            tokens=[1, 2, 10, 20, 30],
+            response_length=1,
+            loss_mask=[1],
+            rollout_log_probs=[-0.2],
+        )
+        b.opd_loss_mask = [0.0]
+
+        merged = _merge_sample_pair(a, b, mock_tokenizer)
+
+        assert merged.opd_loss_mask == [1.0, 0.0, 0.0]
 
     def test_tokens_prefix_mismatch_raises(self, mock_tokenizer):
         a = make_sample(

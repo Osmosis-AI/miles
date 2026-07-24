@@ -1,6 +1,8 @@
 from copy import deepcopy
 from dataclasses import fields
 
+import torch
+
 from miles.utils.types import Sample
 
 _OPD_STUDENT_TOP_LOGPROBS_KEY = "opd_student_top_logprobs"
@@ -47,14 +49,36 @@ def _merge_sample_pair(a: Sample, b: Sample, tokenizer) -> Sample:
         if sample.rollout_log_probs is None:
             sample.rollout_log_probs = [0.0] * sample.response_length
 
-    def _merge_optional_per_token(field):
-        # Optional OPD per-token lists (teacher_log_probs, opd_reverse_kl): merge like
-        # rollout_log_probs when present (zeros over the injected observation span), else keep None.
+    def _merge_optional_per_token(field, *, missing_value=0.0):
+        # Optional OPD per-token values merge like rollout_log_probs when present.
+        # Injected observation spans always receive zero OPD signal.
         av, bv = getattr(a, field), getattr(b, field)
         if av is None and bv is None:
             return None
-        av = av if av is not None else [0.0] * a.response_length
-        bv = bv if bv is not None else [0.0] * b.response_length
+
+        if isinstance(av, torch.Tensor) or isinstance(bv, torch.Tensor):
+            reference = av if isinstance(av, torch.Tensor) else bv
+
+            def _as_tensor(value, response_length):
+                if value is None:
+                    return torch.full(
+                        (response_length,),
+                        missing_value,
+                        dtype=reference.dtype,
+                        device=reference.device,
+                    )
+                return torch.as_tensor(value, dtype=reference.dtype, device=reference.device)
+
+            return torch.cat(
+                (
+                    _as_tensor(av, a.response_length),
+                    torch.zeros(obs_len, dtype=reference.dtype, device=reference.device),
+                    _as_tensor(bv, b.response_length),
+                )
+            )
+
+        av = av if av is not None else [missing_value] * a.response_length
+        bv = bv if bv is not None else [missing_value] * b.response_length
         return av + [0.0] * obs_len + bv
 
     def _pop_opd_student_top_logprobs(metadata):
@@ -159,6 +183,7 @@ def _merge_sample_pair(a: Sample, b: Sample, tokenizer) -> Sample:
             rollout_log_probs=a.rollout_log_probs + [0.0] * obs_len + b.rollout_log_probs,
             teacher_log_probs=_merge_optional_per_token("teacher_log_probs"),
             opd_reverse_kl=_merge_optional_per_token("opd_reverse_kl"),
+            opd_loss_mask=_merge_optional_per_token("opd_loss_mask", missing_value=1.0),
             rollout_routed_experts=b.rollout_routed_experts,
             rollout_indexer_topk=b.rollout_indexer_topk,
             remove_sample=_merge_equal_value("remove_sample"),
