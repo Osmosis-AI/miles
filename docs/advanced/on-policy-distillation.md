@@ -14,6 +14,13 @@ On-policy distillation (OPD) trains a student model on its own rollouts while us
 | `--opd-reward-weight-mode` | Weighting scheme for top-k rewards: `student_p`, `teacher_p`, or `none`. |
 | `--opd-teacher-load` | Path to teacher Megatron checkpoint. **Required** when `--opd-type=megatron`, **must not be set** when `--opd-type=sglang`. |
 | `--opd-teacher-ckpt-step` | Optional checkpoint step for teacher model. |
+| `--teacher-tokenizer-path` | Teacher tokenizer/model path for xToken-aligned cross-tokenizer SGLang OPD. |
+| `--opd-prompt-messages-key` | Metadata key used to preserve raw chat messages before applying the student chat template. |
+| `--opd-mask-teacher-logprob-tokens` | Student-tokenizer strings whose complete aligned chunks receive zero cross-tokenizer OPD delta. |
+| `--opd-teacher-timeout` | Total timeout in seconds for each SGLang teacher request. |
+| `--opd-teacher-retries` | Number of retries for transient teacher failures before using a zero OPD signal. |
+| `--opd-teacher-concurrency` | Maximum concurrent teacher requests per rollout worker; `0` means unlimited. |
+| `--opd-teacher-strict` | Abort cross-tokenizer rollout processing after teacher retries are exhausted instead of using a zero OPD fallback. |
 
 ## How It Works
 
@@ -43,6 +50,8 @@ The token set is controlled by `--opd-top-k-strategy`:
 
 `--opd-reward-weight-mode` controls whether each selected token is weighted by student probability, teacher probability, or uniformly. For compatibility, `--opd-log-prob-top-k=0` keeps the original sampled-token OPD path.
 
+The top-k reward assumes a shared vocabulary. Cross-tokenizer OPD instead aligns sampled response spans and therefore requires `--opd-log-prob-top-k=0`.
+
 ## Two Teacher Modes
 
 ### SGLang Mode (`--opd-type sglang`)
@@ -70,6 +79,37 @@ The teacher runs on an external SGLang server. Teacher log-probs are obtained du
 --custom-reward-post-process-path miles.rollout.on_policy_distillation.post_process_rewards
 --rm-url http://<TEACHER_IP>:<TEACHER_PORT>/generate
 ```
+
+### xToken-Aligned Cross-Tokenizer SGLang Mode
+
+When the student and teacher use different tokenizers, sending student token IDs to the teacher is incorrect. Miles provides a sampled-logprob cross-tokenizer path that preserves the original chat messages, renders the prompt independently with each model's chat template, decodes the sampled student response, and retokenizes that text with the teacher tokenizer before requesting teacher log-probabilities.
+
+The post-processor uses xToken-style dynamic-programming alignment to form text-equivalent response chunks. For a valid chunk $c$ with student positions $S_c$ and teacher positions $T_c$, it computes:
+
+$$
+d_c = \sum_{i \in S_c}\log P_{\text{student}}(y_i) -
+      \sum_{j \in T_c}\log P_{\text{teacher}}(z_j)
+$$
+
+Each student position in the chunk receives $d_c / |S_c|$. This preserves the sampled chunk log-ratio without overweighting tokenizations that split the same text into more pieces. Incorrect, insertion/deletion, protected, non-finite, malformed, or failed-teacher chunks receive zero. The resulting tensor is stored in `sample.opd_reverse_kl` and follows the same training-data path as the top-k precomputed penalty.
+
+Use both cross-tokenizer hooks together:
+
+```bash
+--use-opd
+--opd-type sglang
+--opd-kl-coef 1.0
+--opd-log-prob-top-k 0
+--custom-rm-path miles.rollout.on_policy_distillation.reward_func_cross_vocab
+--custom-reward-post-process-path miles.rollout.on_policy_distillation.post_process_rewards_cross_vocab
+--teacher-tokenizer-path /path/to/teacher
+--opd-prompt-messages-key opd_messages
+--rm-url http://<TEACHER_IP>:<TEACHER_PORT>/generate
+```
+
+This path currently supports text-only samples. Miles logs cross-tokenizer alignment coverage and teacher-fallback counts; inspect those messages before interpreting a small `rollout/opd_reverse_kl`. By default, failed requests produce a zero distillation signal. With `--opd-teacher-strict`, including in the 8×H200 launcher below, exhausted retries abort rollout processing instead.
+
+This is **xToken-aligned sampled-logprob OPD**, not projection-guided X-Token P-KL/H-KL. It does not use a vocabulary projection matrix.
 
 ### Megatron Mode (`--opd-type megatron`)
 
@@ -115,6 +155,17 @@ PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
 # 3. Run
 bash examples/on_policy_distillation/run-qwen3-8B-opd.sh
 ```
+
+### Cross-Tokenizer SGLang Teacher on 8×H200
+
+The Llama-3.2-3B/Nemotron-3-Super-120B example uses GPUs 0–3 for the colocated Miles actor and four one-GPU student rollout engines. GPUs 4–7 host the teacher with tensor parallelism 4:
+
+```bash
+cd /root/miles
+bash examples/on_policy_distillation/run-llama3.2-3B-nemotron3-super-120B-cross-vocab-opd.sh
+```
+
+The launcher defaults to the model, checkpoint, and DAPO data paths under `/data` used by the single-node runbook. It uses sampled-token OPD (`--opd-log-prob-top-k 0`), an external safe working directory, `PYTHONSAFEPATH=1`, dedicated Ray ports and a dedicated Ray temporary directory. W&B uses the existing local login; the script neither requires nor prints an API key. Run it in the Miles image, whose `sglang-miles` build provides transactional `begin_weight_update`/`end_weight_update` support. For a source checkout, set `SGLANG_PYTHON_ROOT` to that build's `python` directory; the launcher verifies the API before loading the teacher and passes the same source to every Ray worker. All paths, ports, CUDA masks, log paths, and the safe working directory can be overridden with environment variables.
 
 ### Megatron Teacher
 

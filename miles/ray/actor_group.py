@@ -66,15 +66,9 @@ class RayTrainGroup:
             env_vars["DUMPER_SOURCE_PATCHER_CONFIG"] = source_patcher_config
 
         if self.args.offload_train and self.args.train_backend == "megatron":
-            import torch_memory_saver
+            from torch_memory_saver.utils import get_binary_path_from_package
 
-            dynlib_path = os.path.join(
-                os.path.dirname(os.path.dirname(torch_memory_saver.__file__)),
-                "torch_memory_saver_hook_mode_preload.abi3.so",
-            )
-            assert os.path.exists(dynlib_path), f"LD_PRELOAD so file {dynlib_path} does not exist."
-
-            env_vars["LD_PRELOAD"] = dynlib_path
+            env_vars["LD_PRELOAD"] = str(get_binary_path_from_package("torch_memory_saver_hook_mode_preload"))
             env_vars["TMS_INIT_ENABLE"] = "1"
             env_vars["TMS_INIT_ENABLE_CPU_BACKUP"] = "1"
 

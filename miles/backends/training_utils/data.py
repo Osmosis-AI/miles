@@ -70,29 +70,34 @@ def get_rollout_data(args: Namespace, rollout_data_ref: Box) -> RolloutBatch:
 
         rollout_data["max_seq_lens"] = [max_seq_len] * len(rollout_data["tokens"])
 
-    if "rollout_log_probs" in rollout_data:
-        rollout_logprob_dtype = _rollout_logprob_dtype(args)
-        rollout_data["rollout_log_probs"] = [
-            torch.tensor(
-                slice_log_prob_with_cp(
-                    log_prob,
-                    total_length,
-                    response_length,
-                    args.qkv_format,
-                    rollout_data["max_seq_lens"][i] if args.qkv_format == "bshd" else None,
-                ),
-                device=torch.cuda.current_device(),
-                dtype=rollout_logprob_dtype,
+    response_field_dtypes = (
+        ("rollout_log_probs", _rollout_logprob_dtype(args)),
+        ("teacher_log_probs", torch.float32),
+        ("opd_reverse_kl", torch.float32),
+        ("opd_loss_masks", torch.float32),
+    )
+    for key, dtype in response_field_dtypes:
+        if key not in rollout_data:
+            continue
+
+        local_values = []
+        for i, (value, total_length, response_length) in enumerate(
+            zip(
+                rollout_data[key],
+                rollout_data["total_lengths"],
+                rollout_data["response_lengths"],
+                strict=True,
             )
-            for i, (log_prob, total_length, response_length) in enumerate(
-                zip(
-                    rollout_data["rollout_log_probs"],
-                    rollout_data["total_lengths"],
-                    rollout_data["response_lengths"],
-                    strict=False,
-                )
+        ):
+            value = slice_log_prob_with_cp(
+                torch.as_tensor(value),
+                total_length,
+                response_length,
+                args.qkv_format,
+                rollout_data["max_seq_lens"][i] if args.qkv_format == "bshd" else None,
             )
-        ]
+            local_values.append(value.to(device=torch.cuda.current_device(), dtype=dtype))
+        rollout_data[key] = local_values
     if "rollout_routed_experts" in rollout_data:
         rollout_data["rollout_routed_experts"] = [torch.from_numpy(r) for r in rollout_data["rollout_routed_experts"]]
     if "rollout_indexer_topk" in rollout_data:

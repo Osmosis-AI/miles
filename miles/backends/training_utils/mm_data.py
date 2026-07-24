@@ -40,13 +40,13 @@ def _expand_image_tokens_for_sample(
     loss_mask: torch.Tensor,
     grid_thws: torch.Tensor,
     media_token_id: int = KIMI_VL_MEDIA_TOKEN_ID,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, list[tuple[int, int]]]:
     if grid_thws is None or len(grid_thws) == 0:
-        return tokens, loss_mask
+        return tokens, loss_mask, []
 
     placeholder_positions = (tokens == media_token_id).nonzero(as_tuple=True)[0]
     if len(placeholder_positions) == 0:
-        return tokens, loss_mask
+        return tokens, loss_mask, []
 
     num_placeholders = len(placeholder_positions)
     num_grids = len(grid_thws)
@@ -54,7 +54,7 @@ def _expand_image_tokens_for_sample(
     if num_placeholders == expected_total_image_tokens:
         # Already pre-expanded. Keep this helper idempotent because the same
         # rollout batch may pass through multiple normalization paths.
-        return tokens, loss_mask
+        return tokens, loss_mask, []
     if num_placeholders != num_grids:
         logger.warning(
             "K25 multimodal token mismatch before training: placeholders=%s, grids=%s",
@@ -67,6 +67,7 @@ def _expand_image_tokens_for_sample(
 
     expanded_tokens = tokens.clone()
     expanded_mask = loss_mask.clone()
+    response_expansions = []
 
     for i, pos in enumerate(reversed(placeholder_positions)):
         pos = pos.item()
@@ -88,8 +89,20 @@ def _expand_image_tokens_for_sample(
                 num_image_tokens, dtype=expanded_mask.dtype, device=expanded_mask.device
             )
             expanded_mask = torch.cat([expanded_mask[:mask_pos], expanded_mask_tokens, expanded_mask[mask_pos + 1 :]])
+            response_expansions.append((mask_pos, num_image_tokens))
 
-    return expanded_tokens, expanded_mask
+    return expanded_tokens, expanded_mask, response_expansions
+
+
+def _expand_response_values(
+    values: torch.Tensor,
+    response_expansions: Sequence[tuple[int, int]],
+) -> torch.Tensor:
+    expanded = values
+    for response_pos, num_image_tokens in response_expansions:
+        zeros = expanded.new_zeros((num_image_tokens, *expanded.shape[1:]))
+        expanded = torch.cat([expanded[:response_pos], zeros, expanded[response_pos + 1 :]])
+    return expanded
 
 
 def _collect_multimodal_grid_inputs(
@@ -137,10 +150,11 @@ def expand_multimodal_rollout_data_in_place(
     expanded_loss_masks = []
     expanded_total_lengths = []
     expanded_response_lengths = []
+    response_expansions_by_sample = []
 
     for i, (token_tensor, loss_mask_tensor) in enumerate(zip(tokens, loss_masks, strict=False)):
         if mm_inputs_list[i] is not None:
-            new_tokens, new_loss_mask = _expand_image_tokens_for_sample(
+            new_tokens, new_loss_mask, response_expansions = _expand_image_tokens_for_sample(
                 token_tensor,
                 loss_mask_tensor,
                 mm_inputs_list[i]["grid_thws"],
@@ -153,11 +167,13 @@ def expand_multimodal_rollout_data_in_place(
             expanded_loss_masks.append(new_loss_mask)
             expanded_total_lengths.append(new_tokens.size(0))
             expanded_response_lengths.append(new_loss_mask.size(0))
+            response_expansions_by_sample.append(response_expansions)
         else:
             expanded_tokens.append(token_tensor)
             expanded_loss_masks.append(loss_mask_tensor)
             expanded_total_lengths.append(old_total_lengths[i])
             expanded_response_lengths.append(old_response_lengths[i])
+            response_expansions_by_sample.append([])
 
     rollout_data["tokens"] = expanded_tokens
     rollout_data["loss_masks"] = expanded_loss_masks
@@ -170,27 +186,44 @@ def expand_multimodal_rollout_data_in_place(
     if metadata_changed:
         parallel_state = get_parallel_state()
         cp_size = parallel_state.cp.size
-        if cp_size > 1 and qkv_format == "thd":
-            for key in ("rollout_log_probs", "teacher_log_probs"):
-                values = rollout_data.get(key)
-                if not values:
-                    continue
-                rollout_data[key] = [
-                    slice_log_prob_with_cp(
-                        all_gather_with_cp(value, old_total_length, old_response_length),
+        if cp_size > 1 and qkv_format != "thd":
+            raise ValueError(
+                "Kimi VL multimodal token expansion with context parallelism requires qkv_format='thd'"
+            )
+        for key in ("rollout_log_probs", "teacher_log_probs", "opd_reverse_kl", "opd_loss_masks"):
+            values = rollout_data.get(key)
+            if not values:
+                continue
+
+            expanded_values = []
+            for (
+                value,
+                old_total_length,
+                old_response_length,
+                new_total_length,
+                new_response_length,
+                response_expansions,
+            ) in zip(
+                values,
+                old_total_lengths,
+                old_response_lengths,
+                expanded_total_lengths,
+                expanded_response_lengths,
+                response_expansions_by_sample,
+                strict=False,
+            ):
+                if cp_size > 1 and qkv_format == "thd":
+                    value = all_gather_with_cp(value, old_total_length, old_response_length)
+                value = _expand_response_values(value, response_expansions)
+                if cp_size > 1 and qkv_format == "thd":
+                    value = slice_log_prob_with_cp(
+                        value,
                         new_total_length,
                         new_response_length,
                         qkv_format,
                     )
-                    for value, old_total_length, old_response_length, new_total_length, new_response_length in zip(
-                        values,
-                        old_total_lengths,
-                        old_response_lengths,
-                        expanded_total_lengths,
-                        expanded_response_lengths,
-                        strict=False,
-                    )
-                ]
+                expanded_values.append(value)
+            rollout_data[key] = expanded_values
         logger.info(
             "Adjusted multimodal rollout metadata for Kimi VL: "
             f"token_or_mask_changed={token_or_mask_changed}, "

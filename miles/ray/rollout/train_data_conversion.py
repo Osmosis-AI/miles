@@ -91,6 +91,9 @@ def convert_samples_to_train_data(
     if samples[0].opd_reverse_kl is not None:
         train_data["opd_reverse_kl"] = [sample.opd_reverse_kl for sample in samples]
 
+    if samples[0].opd_loss_mask is not None:
+        train_data["opd_loss_masks"] = [sample.opd_loss_mask for sample in samples]
+
     x = metadata.get("dynamic_global_batch_size")
     assert args.use_dynamic_global_batch_size == (x is not None)
     if x is not None:
@@ -166,6 +169,7 @@ def split_train_data_by_dp(args, data, dp_size):
             "prompt",
             "teacher_log_probs",
             "opd_reverse_kl",
+            "opd_loss_masks",
             "weight_versions",
             "adapter_slots",
         ]:
