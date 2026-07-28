@@ -341,6 +341,30 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--use-chunked-tp-logprob-loss",
+                action="store_true",
+                default=False,
+                help=(
+                    "Compute actor log probabilities from hidden states in sequence chunks instead of "
+                    "materializing the full tensor-parallel vocab logits tensor."
+                ),
+            )
+            parser.add_argument(
+                "--chunked-tp-logprob-seq-chunk-size",
+                type=int,
+                default=256,
+                help="Sequence chunk size for --use-chunked-tp-logprob-loss.",
+            )
+            parser.add_argument(
+                "--use-fused-tp-logprob-kernel",
+                action="store_true",
+                default=False,
+                help=(
+                    "Use the fused Triton selected-TP-logprob kernel inside the chunked bypass. "
+                    "Requires --use-chunked-tp-logprob-loss."
+                ),
+            )
+            parser.add_argument(
                 "--allgather-cp",
                 action="store_true",
                 default=False,
