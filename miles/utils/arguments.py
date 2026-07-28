@@ -322,6 +322,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=False,
             )
             parser.add_argument(
+                "--use-chunked-tp-logprob-loss",
+                action="store_true",
+                help="Project response hidden states in chunks instead of materializing full actor logits.",
+            )
+            parser.add_argument(
+                "--recompute-chunked-tp-logprob-loss",
+                action="store_true",
+                help="Recompute chunked actor logits during backward to save memory.",
+            )
+            parser.add_argument(
                 "--allgather-cp",
                 action="store_true",
                 default=False,
@@ -2613,6 +2623,13 @@ def miles_validate_args(args):
 
     if args.custom_megatron_post_save_hook_path is not None:
         assert args.save is not None, "'--save' is required when custom_megatron_post_save_hook_path is set."
+
+    assert (
+        not args.use_chunked_tp_logprob_loss or args.train_backend == "megatron"
+    ), "--use-chunked-tp-logprob-loss requires --train-backend megatron"
+    assert (
+        not args.recompute_chunked_tp_logprob_loss or args.use_chunked_tp_logprob_loss
+    ), "--recompute-chunked-tp-logprob-loss requires --use-chunked-tp-logprob-loss"
 
     # Parse LoRA target modules
     if args.lora_rank > 0:
