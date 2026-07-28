@@ -22,6 +22,11 @@ parallelism:
   expert: 8
   data: 4
   rollout_tensor: 4
+batch:
+  rollout_prompts: 2
+  samples_per_prompt: 2
+  global: 4
+  micro: 1
 features:
   standard_bridge_lora: true
   chunked_tp_logprob: true

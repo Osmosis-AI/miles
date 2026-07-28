@@ -5,6 +5,9 @@ set -uo pipefail
 : "${TP_SIZE:?set TP_SIZE}"
 : "${LAUNCH_SOURCE:?set LAUNCH_SOURCE}"
 
+ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-2}
+GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-4}
+
 REPO=/root/andy-miles
 OUT="/workspace/andy-miles-update/post-upstream/${RUN_NAME}"
 HF_CHECKPOINT=/workspace/ablations/qwen3-5-35b-matrix/models/Qwen3.5-35B-A3B-rand-bf16
@@ -113,11 +116,11 @@ timeout 5400 ray job submit \
   --rm-type deepscaler \
   --start-rollout-id 0 \
   --num-rollout 1 \
-  --rollout-batch-size 2 \
+  --rollout-batch-size "${ROLLOUT_BATCH_SIZE}" \
   --n-samples-per-prompt 2 \
   --rollout-max-response-len 64 \
   --rollout-temperature 1 \
-  --global-batch-size 4 \
+  --global-batch-size "${GLOBAL_BATCH_SIZE}" \
   --balance-data \
   --skip-eval-before-train \
   --advantage-estimator grpo \
