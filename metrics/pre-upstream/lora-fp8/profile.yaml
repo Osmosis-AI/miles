@@ -1,0 +1,34 @@
+phase: pre-upstream
+feature_commit: df0cc01a2b5464eb2232e04ce546f753fcaa2492
+fp8_commit: 81ca261b38475c87bf77d206a80f0b5b4af0e5ea
+workload:
+  namespace: trainers
+  name: andy-miles-dev-node
+  priority_class: skypilot-high-priority
+hardware:
+  nodes: 1
+  gpus_per_node: 8
+  accelerator: NVIDIA H200
+model:
+  name: Qwen3.5-35B-A3B
+  architecture: mixture-of-experts
+  mode: LoRA
+  checkpoint: /workspace/ablations/qwen3-5-35b-matrix/models/Qwen3.5-35B-A3B-rand-bf16
+parallelism:
+  tensor: 2
+  pipeline: 1
+  context: 1
+  expert: 8
+  data: 1
+features:
+  chunked_tp_logprob: true
+  fused_tp_logprob: true
+  fp8_frozen_base: true
+  fp8_per_layer_free: true
+  transformer_engine_blockwise_fp8: true
+success_criteria:
+  - process exits with status 0
+  - FP8 frozen-base quantization is reported
+  - at least one LoRA optimizer step completes
+  - loss, gradient norm, and performance metrics are finite
+  - no CUDA out-of-memory error

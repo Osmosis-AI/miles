@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: andy-miles-dev-node
+  namespace: trainers
+  labels:
+    app: andy-miles-dev-node
+    owner: andy
+    purpose: miles-feature-verification
+spec:
+  priorityClassName: skypilot-high-priority
+  preemptionPolicy: PreemptLowerPriority
+  restartPolicy: Never
+  hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
+  terminationGracePeriodSeconds: 30
+  nodeSelector:
+    nvidia.com/gpu.product: NVIDIA-H200
+  containers:
+    - name: trainer
+      image: docker.io/radixark/miles@sha256:6c1a7d471b5410f1c6f1841d305f401716e3aba7f62bdcd2acad586cfbd05fed
+      imagePullPolicy: IfNotPresent
+      command: ["bash", "-lc", "sleep infinity"]
+      securityContext:
+        privileged: true
+      env:
+        - name: HF_HOME
+          value: /workspace/hf_cache
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: NCCL_TIMEOUT_MS
+          value: "36000000"
+      resources:
+        requests:
+          cpu: "32"
+          memory: 512Gi
+          nvidia.com/gpu: "8"
+        limits:
+          cpu: "120"
+          memory: 1600Gi
+          nvidia.com/gpu: "8"
+      volumeMounts:
+        - name: weka-data
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+  volumes:
+    - name: weka-data
+      persistentVolumeClaim:
+        claimName: weka-data
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 512Gi

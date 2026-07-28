@@ -1,0 +1,30 @@
+phase: pre-upstream
+feature_commit: df0cc01a2b5464eb2232e04ce546f753fcaa2492
+fp8_commit: 81ca261b38475c87bf77d206a80f0b5b4af0e5ea
+workload:
+  namespace: trainers
+  name: andy-miles-dev-node
+  priority_class: skypilot-high-priority
+hardware:
+  nodes: 1
+  gpus_per_node: 8
+  accelerator: NVIDIA H200
+model:
+  name: Qwen3-4B
+  mode: full-parameter
+  checkpoint: /workspace/qwen3-4b-chunked-logprob-smoke/Qwen3-4B
+parallelism:
+  tensor: 2
+  pipeline: 1
+  context: 1
+  expert: 1
+  data: 4
+features:
+  chunked_tp_logprob: true
+  fused_tp_logprob: true
+  fp8_frozen_base: false
+success_criteria:
+  - process exits with status 0
+  - at least one optimizer step completes
+  - loss, gradient norm, and performance metrics are finite
+  - no CUDA out-of-memory error
