@@ -18,7 +18,7 @@ spec:
     nvidia.com/gpu.product: NVIDIA-H200
   containers:
     - name: trainer
-      image: docker.io/radixark/miles@sha256:6c1a7d471b5410f1c6f1841d305f401716e3aba7f62bdcd2acad586cfbd05fed
+      image: docker.io/radixark/miles@sha256:c6e09b6b20cad09aefe312bc4311bf6d4978b9ff2679d41b2f80fa0e4d19d12a
       imagePullPolicy: IfNotPresent
       command: ["bash", "-lc", "sleep infinity"]
       securityContext:

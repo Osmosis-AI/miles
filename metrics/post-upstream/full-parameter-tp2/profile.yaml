@@ -1,0 +1,31 @@
+phase: post-upstream
+source_branch: andy/update-miles
+upstream_commit: 423160507a83d350dddffd27fa7a0325fd739f79
+container_image: docker.io/radixark/miles@sha256:c6e09b6b20cad09aefe312bc4311bf6d4978b9ff2679d41b2f80fa0e4d19d12a
+workload:
+  namespace: trainers
+  name: andy-miles-dev-node
+  priority_class: skypilot-high-priority
+hardware:
+  nodes: 1
+  gpus_per_node: 8
+  accelerator: NVIDIA H200
+model:
+  name: Qwen3-4B
+  mode: full-parameter
+  checkpoint: /workspace/qwen3-4b-chunked-logprob-smoke/Qwen3-4B
+parallelism:
+  tensor: 2
+  pipeline: 1
+  context: 1
+  expert: 1
+  data: 4
+features:
+  chunked_tp_logprob: true
+  fused_tp_logprob: true
+  fp8_frozen_base: false
+success_criteria:
+  - process exits with status 0
+  - at least one optimizer step completes
+  - loss, gradient norm, and performance metrics are finite
+  - no CUDA out-of-memory error
