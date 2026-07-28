@@ -102,6 +102,7 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
     provider.recompute_modules = args.recompute_modules
     provider.distribute_saved_activations = args.distribute_saved_activations
     provider.variable_seq_lengths = True
+    provider.attention_backend = args.attention_backend
     provider.moe_token_dispatcher_type = "alltoall"
     provider.moe_router_load_balancing_type = "none"
     if getattr(args, "decoder_first_pipeline_num_layers", None) is not None:
