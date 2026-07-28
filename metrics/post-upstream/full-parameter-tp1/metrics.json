@@ -1,0 +1,136 @@
+{
+  "exit_status": 0,
+  "feature_evidence": {
+    "chunked_tp_logprob_installed": true,
+    "completed_optimizer_step": true,
+    "cuda_oom": false,
+    "fp8_frozen_base_quantized": false,
+    "fused_tp_logprob_enabled": true,
+    "traceback": false
+  },
+  "finite_training_metrics": true,
+  "fp8_frozen_base": null,
+  "gpu_profile": {
+    "max_memory_used_mib": 64510.0,
+    "max_utilization_percent": 100.0,
+    "per_gpu": {
+      "0": {
+        "max_memory_used_mib": 64510.0,
+        "max_power_watts": 371.09,
+        "max_utilization_percent": 100.0,
+        "memory_total_mib": 143771.0
+      },
+      "1": {
+        "max_memory_used_mib": 62254.0,
+        "max_power_watts": 523.13,
+        "max_utilization_percent": 100.0,
+        "memory_total_mib": 143771.0
+      },
+      "2": {
+        "max_memory_used_mib": 62254.0,
+        "max_power_watts": 550.78,
+        "max_utilization_percent": 100.0,
+        "memory_total_mib": 143771.0
+      },
+      "3": {
+        "max_memory_used_mib": 62254.0,
+        "max_power_watts": 453.6,
+        "max_utilization_percent": 100.0,
+        "memory_total_mib": 143771.0
+      },
+      "4": {
+        "max_memory_used_mib": 62254.0,
+        "max_power_watts": 492.71,
+        "max_utilization_percent": 100.0,
+        "memory_total_mib": 143771.0
+      },
+      "5": {
+        "max_memory_used_mib": 62254.0,
+        "max_power_watts": 438.81,
+        "max_utilization_percent": 69.0,
+        "memory_total_mib": 143771.0
+      },
+      "6": {
+        "max_memory_used_mib": 62254.0,
+        "max_power_watts": 400.59,
+        "max_utilization_percent": 100.0,
+        "memory_total_mib": 143771.0
+      },
+      "7": {
+        "max_memory_used_mib": 62014.0,
+        "max_power_watts": 411.8,
+        "max_utilization_percent": 96.0,
+        "memory_total_mib": 143771.0
+      }
+    },
+    "sample_rows": 960
+  },
+  "rollout_metrics": {
+    "rollout/advantages": 0.0,
+    "rollout/log_probs": -0.14791247248649597,
+    "rollout/raw_reward": 0.0,
+    "rollout/ref_log_probs": -0.14791247248649597,
+    "rollout/response_lengths": 64.0,
+    "rollout/returns": 0.0,
+    "rollout/rewards": 0.0,
+    "rollout/rollout_log_probs": -0.1467406628653407,
+    "rollout/total_lengths": 228.5,
+    "rollout/truncated": 1.0
+  },
+  "rollout_performance": {
+    "perf/effective_tokens_per_gpu_per_sec": 44.6656782945156,
+    "perf/longest_effective_sample_tokens_per_sec": 44.6656782945156,
+    "perf/longest_sample_tokens_per_sec": 44.6656782945156,
+    "perf/rollout_time": 1.4328675270080566,
+    "perf/tokens_per_gpu_per_sec": 44.6656782945156,
+    "rollout/avg_cached_tokens_per_sample": 0.0,
+    "rollout/prefix_cache_hit_rate": 0.0,
+    "rollout/repetition_frac": 0.0,
+    "rollout/response_len/max": 64,
+    "rollout/response_len/mean": 64.0,
+    "rollout/response_len/median": 64.0,
+    "rollout/response_len/min": 64,
+    "rollout/truncated_ratio": 1.0,
+    "rollout/weight_version/max": 1,
+    "rollout/weight_version/mean": 1.0,
+    "rollout/weight_version/median": 1.0,
+    "rollout/weight_version/min": 1,
+    "rollout/weight_version/mixed_version_ratio": 0.0,
+    "rollout/zero_std/all_one_percentage": 0.0,
+    "rollout/zero_std/all_zero_percentage": 0.0,
+    "rollout/zero_std/count_0": 4
+  },
+  "status": "passed",
+  "train_metrics": {
+    "train/entropy_loss": 0.1499308943748474,
+    "train/ess_ratio": 1.0,
+    "train/grad_norm": 0.0006969184689626894,
+    "train/kl_loss": 0.0,
+    "train/loss": -1.4993089280324057e-05,
+    "train/lr-pg_0": 1e-06,
+    "train/lr-pg_1": 1e-06,
+    "train/pg_clipfrac": 0.0,
+    "train/pg_loss": 0.0,
+    "train/ppo_kl": 0.0,
+    "train/step": 0,
+    "train/train_rollout_kl": 0.0006241421797312796,
+    "train/train_rollout_logprob_abs_diff": 0.00892002321779728
+  },
+  "train_performance": {
+    "perf/actor_train_tflops": 0.8081732046195395,
+    "perf/actor_train_time": 6.366166114807129,
+    "perf/actor_train_tok_per_s": 287.1429942345106,
+    "perf/data_preprocess_time": 0.0008864402770996094,
+    "perf/log_probs_tflops": 19.920525527706044,
+    "perf/log_probs_time": 0.08609151840209961,
+    "perf/ref_log_probs_tflops": 0.8040870964116006,
+    "perf/ref_log_probs_time": 2.1328389644622803,
+    "perf/sleep_time": 1.3738312721252441,
+    "perf/step_time": 15.00973629951477,
+    "perf/train_time": 9.290539503097534,
+    "perf/train_wait_time": 5.719196796417236,
+    "perf/update_weights_time": 0.47286105155944824,
+    "perf/wait_time_ratio": 0.3810324633486149,
+    "perf/wake_up_time": 0.9904537200927734
+  }
+}

@@ -1,0 +1,135 @@
+{
+  "exit_status": 0,
+  "feature_evidence": {
+    "chunked_tp_logprob_installed": true,
+    "completed_optimizer_step": true,
+    "cuda_oom": false,
+    "fp8_frozen_base_quantized": true,
+    "fused_tp_logprob_enabled": true,
+    "traceback": false
+  },
+  "finite_training_metrics": true,
+  "fp8_frozen_base": {
+    "freed_gb_per_rank": 4.7,
+    "quantized_tensors": 2896,
+    "roundtrip_relative_error": 0.0356
+  },
+  "gpu_profile": {
+    "max_memory_used_mib": 66962.0,
+    "max_utilization_percent": 100.0,
+    "per_gpu": {
+      "0": {
+        "max_memory_used_mib": 65718.0,
+        "max_power_watts": 512.92,
+        "max_utilization_percent": 100.0,
+        "memory_total_mib": 143771.0
+      },
+      "1": {
+        "max_memory_used_mib": 66962.0,
+        "max_power_watts": 546.35,
+        "max_utilization_percent": 100.0,
+        "memory_total_mib": 143771.0
+      },
+      "2": {
+        "max_memory_used_mib": 66962.0,
+        "max_power_watts": 550.32,
+        "max_utilization_percent": 92.0,
+        "memory_total_mib": 143771.0
+      },
+      "3": {
+        "max_memory_used_mib": 66242.0,
+        "max_power_watts": 512.85,
+        "max_utilization_percent": 100.0,
+        "memory_total_mib": 143771.0
+      },
+      "4": {
+        "max_memory_used_mib": 62963.0,
+        "max_power_watts": 514.27,
+        "max_utilization_percent": 100.0,
+        "memory_total_mib": 143771.0
+      },
+      "5": {
+        "max_memory_used_mib": 64059.0,
+        "max_power_watts": 540.19,
+        "max_utilization_percent": 100.0,
+        "memory_total_mib": 143771.0
+      },
+      "6": {
+        "max_memory_used_mib": 64059.0,
+        "max_power_watts": 515.53,
+        "max_utilization_percent": 100.0,
+        "memory_total_mib": 143771.0
+      },
+      "7": {
+        "max_memory_used_mib": 63583.0,
+        "max_power_watts": 541.06,
+        "max_utilization_percent": 100.0,
+        "memory_total_mib": 143771.0
+      }
+    },
+    "sample_rows": 1192
+  },
+  "rollout_metrics": {
+    "rollout/advantages": 0.0,
+    "rollout/log_probs": -13.705512046813965,
+    "rollout/raw_reward": 0.0,
+    "rollout/response_lengths": 64.0,
+    "rollout/returns": 0.0,
+    "rollout/rewards": 0.0,
+    "rollout/rollout_log_probs": -10.746922492980957,
+    "rollout/total_lengths": 246.5,
+    "rollout/truncated": 1.0
+  },
+  "rollout_performance": {
+    "perf/effective_tokens_per_gpu_per_sec": 3.482779359987071,
+    "perf/longest_effective_sample_tokens_per_sec": 6.965558719974142,
+    "perf/longest_sample_tokens_per_sec": 6.965558719974142,
+    "perf/rollout_time": 9.188064098358154,
+    "perf/tokens_per_gpu_per_sec": 3.482779359987071,
+    "rollout/avg_cached_tokens_per_sample": 0.0,
+    "rollout/prefix_cache_hit_rate": 0.0,
+    "rollout/repetition_frac": 0.0,
+    "rollout/response_len/max": 64,
+    "rollout/response_len/mean": 64.0,
+    "rollout/response_len/median": 64.0,
+    "rollout/response_len/min": 64,
+    "rollout/truncated_ratio": 1.0,
+    "rollout/zero_std/all_one_percentage": 0.0,
+    "rollout/zero_std/all_zero_percentage": 0.0,
+    "rollout/zero_std/count_0": 2
+  },
+  "status": "passed",
+  "train_metrics": {
+    "train/entropy_loss": 10.78499984741211,
+    "train/ess_ratio": 1.0,
+    "train/grad_norm": 0.007419483458683113,
+    "train/loss": -0.00107849994674325,
+    "train/lr-pg_0": 1e-06,
+    "train/lr-pg_1": 1e-06,
+    "train/ois": 1.0,
+    "train/pg_clipfrac": 0.0,
+    "train/pg_loss": 0.0,
+    "train/ppo_kl": 0.0,
+    "train/step": 0,
+    "train/tis": 0.47553399205207825,
+    "train/tis_abs": 1.0155420303344727,
+    "train/tis_clipfrac": 0.05859375,
+    "train/train_rollout_kl": 2.4341237545013428,
+    "train/train_rollout_logprob_abs_diff": 3.1634392738342285
+  },
+  "train_performance": {
+    "perf/actor_train_tflops": 0.15289805405269338,
+    "perf/actor_train_time": 10.557450532913208,
+    "perf/actor_train_tok_per_s": 93.3937598784964,
+    "perf/data_preprocess_time": 0.0009129047393798828,
+    "perf/log_probs_tflops": 0.04667576312154445,
+    "perf/log_probs_time": 11.52785038948059,
+    "perf/sleep_time": 7.489839315414429,
+    "perf/step_time": 53.58626413345337,
+    "perf/train_time": 22.128517866134644,
+    "perf/train_wait_time": 31.457746267318726,
+    "perf/update_weights_time": 4.927459716796875,
+    "perf/wait_time_ratio": 0.5870486919740309,
+    "perf/wake_up_time": 4.1761252880096436
+  }
+}

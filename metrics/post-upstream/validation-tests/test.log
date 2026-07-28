@@ -1,0 +1,104 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /root/andy-miles
+configfile: pyproject.toml
+plugins: anyio-4.14.2, hypothesis-6.161.6, asyncio-1.4.0, typeguard-4.5.2
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 141 items
+
+tests/fast/backends/megatron_utils/test_lora_checkpoint_helpers.py ..... [  3%]
+........                                                                 [  9%]
+tests/fast/backends/megatron_utils/test_lora_hf_weight_iterator.py ...   [ 11%]
+tests/fast/backends/megatron_utils/test_lora_model_branches.py ......... [ 17%]
+..                                                                       [ 19%]
+tests/fast/backends/megatron_utils/test_lora_update_weight.py ......     [ 23%]
+tests/fast/backends/megatron_utils/test_lora_utils.py .................. [ 36%]
+............................................                             [ 67%]
+tests/fast/backends/megatron_utils/test_lora_weight_sync_validation.py . [ 68%]
+......................                                                   [ 83%]
+tests/fast/backends/megatron_utils/test_slice_lora_to_rank.py .....      [ 87%]
+tests/fast/backends/megatron_utils/test_bridge_lora_helpers.py .         [ 87%]
+tests/fast/backends/megatron_utils/test_qwen3_5_mtp_bridge_mapping.py .. [ 89%]
+....                                                                     [ 92%]
+tests/fast/backends/megatron_utils/test_fp8_frozen_base.py ...           [ 94%]
+tests/fast/backends/megatron_utils/test_chunked_tp_logprob.py .....      [ 97%]
+tests/fast/backends/megatron_utils/test_selected_tp_logprob_triton.py .. [ 99%]
+.                                                                        [100%]
+
+=============================== warnings summary ===============================
+../../usr/local/lib/python3.12/dist-packages/torch/jit/_script.py:1488
+../../usr/local/lib/python3.12/dist-packages/torch/jit/_script.py:1488
+../../usr/local/lib/python3.12/dist-packages/torch/jit/_script.py:1488
+  /usr/local/lib/python3.12/dist-packages/torch/jit/_script.py:1488: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+../../usr/local/lib/python3.12/dist-packages/torch/jit/_script.py:365: 14 warnings
+  /usr/local/lib/python3.12/dist-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+../Megatron-LM/megatron/core/tensor_parallel/random.py:28
+  /root/Megatron-LM/megatron/core/tensor_parallel/random.py:28: DeprecationWarning: Using deprecated internal API from Transformer Engine. transformer_engine.pytorch.fp8 will be removed in a future release.
+    from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, fp8_autocast
+
+../Megatron-LM/megatron/core/extensions/transformer_engine.py:2601
+  /root/Megatron-LM/megatron/core/extensions/transformer_engine.py:2601: DeprecationWarning: transformer_engine.pytorch.float8_tensor is deprecated and will be removed in a future release. Float8Tensor should be imported directly through `from transformer_engine.pytorch import Float8Tensor`
+    from transformer_engine.pytorch.float8_tensor import Float8Tensor
+
+../Megatron-LM/megatron/core/inference/contexts/__init__.py:9
+  /root/Megatron-LM/megatron/core/inference/contexts/__init__.py:9: DeprecationWarning: The following imports from `dynamic_context.py` will be removed in this file in `megatron-core` 0.14. The imports here result in a cyclic import issue that causes rotary embeddings to import from Apex rather than Transformer Engine.
+    warnings.warn(
+
+../../usr/local/lib/python3.12/dist-packages/flashinfer/gemm/kernels/grouped_gemm_masked_blackwell.py:2383
+  /usr/local/lib/python3.12/dist-packages/flashinfer/gemm/kernels/grouped_gemm_masked_blackwell.py:2383: DeprecationWarning: tcgen05.OperandMajorMode is deprecated, use cute.nvgpu.OperandMajorMode instead
+    a_major_mode: tcgen05.OperandMajorMode,
+
+../../usr/local/lib/python3.12/dist-packages/flashinfer/gemm/kernels/grouped_gemm_masked_blackwell.py:2385
+  /usr/local/lib/python3.12/dist-packages/flashinfer/gemm/kernels/grouped_gemm_masked_blackwell.py:2385: DeprecationWarning: tcgen05.OperandMajorMode is deprecated, use cute.nvgpu.OperandMajorMode instead
+    b_major_mode: tcgen05.OperandMajorMode,
+
+../../usr/local/lib/python3.12/dist-packages/flashinfer/gdn_kernels/blackwell/gated_delta_net_chunked.py:99
+../../usr/local/lib/python3.12/dist-packages/flashinfer/gdn_kernels/blackwell/gated_delta_net_chunked.py:99
+  /usr/local/lib/python3.12/dist-packages/flashinfer/gdn_kernels/blackwell/gated_delta_net_chunked.py:99: DeprecationWarning: tcgen05.OperandMajorMode is deprecated, use cute.nvgpu.OperandMajorMode instead
+    from cutlass.cute.nvgpu.tcgen05 import OperandMajorMode
+
+../Megatron-LM/megatron/core/transformer/multi_latent_attention.py:36
+  /root/Megatron-LM/megatron/core/transformer/multi_latent_attention.py:36: DeprecationWarning: The 'megatron.core.transformer.custom_layers.transformer_engine' 
+      module is deprecated and will be removed in 0.10.0. Please use 
+      'megatron.core.extensions.transformer_engine' instead.
+    from megatron.core.transformer.custom_layers.transformer_engine import (
+
+<frozen importlib._bootstrap>:488
+  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyPacked has no __module__ attribute
+
+<frozen importlib._bootstrap>:488
+  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute
+
+../../usr/local/lib/python3.12/dist-packages/modelopt/torch/__init__.py:51
+  /usr/local/lib/python3.12/dist-packages/modelopt/torch/__init__.py:51: UserWarning: transformers 5.12.1 is not tested with current version of modelopt and may cause issues. Please install recommended version with `pip install -U nvidia-modelopt[hf]` if working with HF models.
+    _warnings.warn(
+
+../Megatron-LM/megatron/rl/inference/inference_interface.py:30
+  /root/Megatron-LM/megatron/rl/inference/inference_interface.py:30: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class InferenceInterface(BaseModel):
+
+../Megatron-LM/megatron/rl/__init__.py:56
+../Megatron-LM/megatron/rl/__init__.py:56
+  /root/Megatron-LM/megatron/rl/__init__.py:56: PydanticDeprecatedSince20: The `__fields__` attribute is deprecated, use the `model_fields` class property instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    cls.Library.type_names[register_type.__fields__['type_name'].default] = register_type
+
+tests/fast/backends/megatron_utils/test_bridge_lora_helpers.py::test_bridge_lora_propagates_attention_backend_before_finalize
+  /root/Megatron-LM/megatron/core/models/mimo/config/base_configs.py:11: UserWarning: MimoModelConfig is experimental and still under active development. The API may change without notice in future releases.
+    class MimoModelConfig:
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+============================== slowest durations ===============================
+24.22s call     tests/fast/backends/megatron_utils/test_selected_tp_logprob_triton.py::test_fused_selected_logprob_matches_two_rank_tp_reference
+1.14s call     tests/fast/backends/megatron_utils/test_selected_tp_logprob_triton.py::test_fused_selected_logprob_matches_reference_forward_and_backward[False]
+0.79s call     tests/fast/backends/megatron_utils/test_fp8_frozen_base.py::test_fp8_frozen_base_roundtrip_and_lifetime[False]
+0.31s call     tests/fast/backends/megatron_utils/test_lora_model_branches.py::TestEnsureModelList::test_list_passthrough
+0.05s call     tests/fast/backends/megatron_utils/test_bridge_lora_helpers.py::test_bridge_lora_propagates_attention_backend_before_finalize
+0.01s call     tests/fast/backends/megatron_utils/test_selected_tp_logprob_triton.py::test_fused_selected_logprob_matches_reference_forward_and_backward[True]
+
+(417 durations < 0.005s hidden.  Use -vv to show these durations.)
+====================== 141 passed, 32 warnings in 27.33s =======================
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute

@@ -1,0 +1,73 @@
+{
+  "exit_status": 1,
+  "feature_evidence": {
+    "chunked_tp_logprob_installed": false,
+    "completed_optimizer_step": false,
+    "cuda_oom": false,
+    "fp8_frozen_base_quantized": false,
+    "fused_tp_logprob_enabled": true,
+    "traceback": true
+  },
+  "finite_training_metrics": true,
+  "fp8_frozen_base": null,
+  "gpu_profile": {
+    "max_memory_used_mib": 61983.0,
+    "max_utilization_percent": 73.0,
+    "per_gpu": {
+      "0": {
+        "max_memory_used_mib": 61839.0,
+        "max_power_watts": 137.35,
+        "max_utilization_percent": 8.0,
+        "memory_total_mib": 143771.0
+      },
+      "1": {
+        "max_memory_used_mib": 61983.0,
+        "max_power_watts": 146.25,
+        "max_utilization_percent": 11.0,
+        "memory_total_mib": 143771.0
+      },
+      "2": {
+        "max_memory_used_mib": 61983.0,
+        "max_power_watts": 134.61,
+        "max_utilization_percent": 9.0,
+        "memory_total_mib": 143771.0
+      },
+      "3": {
+        "max_memory_used_mib": 61263.0,
+        "max_power_watts": 137.34,
+        "max_utilization_percent": 10.0,
+        "memory_total_mib": 143771.0
+      },
+      "4": {
+        "max_memory_used_mib": 59112.0,
+        "max_power_watts": 136.73,
+        "max_utilization_percent": 58.0,
+        "memory_total_mib": 143771.0
+      },
+      "5": {
+        "max_memory_used_mib": 59160.0,
+        "max_power_watts": 134.95,
+        "max_utilization_percent": 8.0,
+        "memory_total_mib": 143771.0
+      },
+      "6": {
+        "max_memory_used_mib": 59160.0,
+        "max_power_watts": 133.61,
+        "max_utilization_percent": 10.0,
+        "memory_total_mib": 143771.0
+      },
+      "7": {
+        "max_memory_used_mib": 58920.0,
+        "max_power_watts": 133.19,
+        "max_utilization_percent": 73.0,
+        "memory_total_mib": 143771.0
+      }
+    },
+    "sample_rows": 800
+  },
+  "rollout_metrics": null,
+  "rollout_performance": null,
+  "status": "failed",
+  "train_metrics": null,
+  "train_performance": null
+}

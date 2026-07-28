@@ -1,6 +1,5 @@
 phase: post-upstream
 source_branch: andy/update-miles
-source_commit: 35a5d0e490480008b01b11adcb8d829b5bcbe6e6
 upstream_commit: 423160507a83d350dddffd27fa7a0325fd739f79
 container_image: docker.io/radixark/miles@sha256:c6e09b6b20cad09aefe312bc4311bf6d4978b9ff2679d41b2f80fa0e4d19d12a
 workload:
@@ -12,21 +11,28 @@ hardware:
   gpus_per_node: 8
   accelerator: NVIDIA H200
 model:
-  name: Qwen3-4B
-  mode: full-parameter
-  checkpoint: /workspace/qwen3-4b-chunked-logprob-smoke/Qwen3-4B
+  name: Qwen3.5-35B-A3B
+  architecture: mixture-of-experts
+  mode: LoRA
+  checkpoint: /workspace/ablations/qwen3-5-35b-matrix/models/Qwen3.5-35B-A3B-rand-bf16
 parallelism:
-  tensor: 1
+  tensor: 2
   pipeline: 1
   context: 1
-  expert: 1
-  data: 8
+  expert: 8
+  data: 4
+  rollout_tensor: 4
 features:
+  standard_bridge_lora: true
   chunked_tp_logprob: true
   fused_tp_logprob: true
-  fp8_frozen_base: false
+  fp8_frozen_base: true
+  fp8_per_layer_free: true
+  transformer_engine_blockwise_fp8: true
+  transformer_engine_fused_attention_fav2_backward: true
 success_criteria:
   - process exits with status 0
-  - at least one optimizer step completes
+  - FP8 frozen-base quantization is reported
+  - at least one LoRA optimizer step completes
   - loss, gradient norm, and performance metrics are finite
   - no CUDA out-of-memory error
