@@ -102,6 +102,9 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
     provider.recompute_modules = args.recompute_modules
     provider.distribute_saved_activations = args.distribute_saved_activations
     provider.variable_seq_lengths = True
+    provider.fp8 = args.fp8
+    provider.fp8_recipe = args.fp8_recipe
+    provider.attention_backend = args.attention_backend
     provider.moe_token_dispatcher_type = "alltoall"
     provider.moe_router_load_balancing_type = "none"
     if getattr(args, "decoder_first_pipeline_num_layers", None) is not None:
@@ -124,6 +127,12 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
     def apply_lora_hook(model_chunks):
         transformed = lora(model_chunks, training=True)
         lora.set_params_to_save(transformed)
+        if args.fp8_frozen_base_store:
+            from megatron.core.fp8_utils import get_fp8_recipe
+
+            from .fp8_frozen_base import prepare_native_fp8_frozen_base
+
+            prepare_native_fp8_frozen_base(transformed, get_fp8_recipe(provider))
         return transformed
 
     provider.register_pre_wrap_hook(apply_lora_hook)

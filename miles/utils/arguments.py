@@ -322,6 +322,11 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=False,
             )
             parser.add_argument(
+                "--fp8-frozen-base-store",
+                action="store_true",
+                help="Store frozen LoRA base linear weights as TE-native block FP8.",
+            )
+            parser.add_argument(
                 "--allgather-cp",
                 action="store_true",
                 default=False,
@@ -2615,6 +2620,14 @@ def miles_validate_args(args):
         assert args.save is not None, "'--save' is required when custom_megatron_post_save_hook_path is set."
 
     # Parse LoRA target modules
+    if getattr(args, "fp8_frozen_base_store", False):
+        assert args.train_backend == "megatron", "--fp8-frozen-base-store requires Megatron"
+        assert args.lora_rank > 0, "--fp8-frozen-base-store requires LoRA"
+        assert args.megatron_to_hf_mode == "bridge", "--fp8-frozen-base-store requires Bridge"
+        assert args.transformer_impl == "transformer_engine", "--fp8-frozen-base-store requires TE"
+        assert args.fp8 == "e4m3", "--fp8-frozen-base-store requires --fp8-format e4m3"
+        assert args.fp8_recipe == "blockwise", "--fp8-frozen-base-store requires blockwise FP8"
+
     if args.lora_rank > 0:
         assert args.target_modules is not None, "'--target-modules' is required when LoRA is enabled."
 

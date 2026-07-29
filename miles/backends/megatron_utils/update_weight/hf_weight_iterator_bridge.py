@@ -2,6 +2,7 @@ import dataclasses
 import json
 import os
 
+from miles.backends.megatron_utils.fp8_frozen_base import materialized_frozen_base
 from miles.backends.megatron_utils.lora_utils import is_lora_weight_name
 from miles.utils import megatron_bridge_utils
 
@@ -37,7 +38,7 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
 
     def get_hf_weight_chunks(self, megatron_local_weights, weight_type: str = "base"):
         renamed_megatron_local_weights = {strip_param_name_prefix(k): v for k, v in megatron_local_weights.items()}
-        with megatron_bridge_utils.patch_megatron_model(self.model):
+        with materialized_frozen_base(self.args, self.model), megatron_bridge_utils.patch_megatron_model(self.model):
             if weight_type == "lora":
                 named_weights = self._bridge.export_adapter_weights(
                     self.model,
