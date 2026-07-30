@@ -49,6 +49,7 @@ from .ci_utils import (
     compute_model_hashes_by_layer,
     save_model_hashes,
 )
+from .fp8_frozen_base import materialized_frozen_base
 from .initialize import is_first_replica_megatron_main_rank
 from .lora_utils import is_lora_enabled, is_lora_model
 from .model_provider import get_model_provider_func
@@ -898,7 +899,7 @@ def save_hf_model(args, rollout_id: int, model: Sequence[DDP]) -> None:
 
         path.mkdir(parents=True, exist_ok=True)
 
-        with patch_megatron_model(model):
+        with materialized_frozen_base(args, model), patch_megatron_model(model):
             # For LoRA models, merge_adapter_weights=True (default) merges
             # adapter weights into base weights for a standalone HF model.
             bridge.save_hf_pretrained(model, path=path)

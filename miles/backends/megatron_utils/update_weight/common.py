@@ -267,12 +267,15 @@ def named_params_and_buffers(
     model: Sequence[torch.nn.Module],
     convert_to_global_name: bool = True,
     translate_gpu_to_cpu: bool = False,
+    skip_fp8_frozen: bool = False,
 ) -> Iterator[tuple[str, torch.Tensor]]:
     if convert_to_global_name:
         ans = _named_params_and_buffers_global(args, model)
     else:
         ans = _named_params_and_buffers_vanilla(model)
 
+    if skip_fp8_frozen:
+        ans = ((name, tensor) for name, tensor in ans if not getattr(tensor, "_fp8_frozen_base", False))
     if translate_gpu_to_cpu:
         ans = ((name, _maybe_get_cpu_backup(tensor)) for name, tensor in ans)
 

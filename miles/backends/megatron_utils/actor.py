@@ -53,6 +53,7 @@ from .ft.checkpoint_transfer import recv_ckpt
 from .ft.checkpoint_transfer import send_ckpt as _send_ckpt
 from .ft.in_memory_checkpoint import InMemoryCheckpointManager
 from .ft.indep_dp import reconfigure_indep_dp_group
+from .fp8_frozen_base import free_frozen_base, materialized_frozen_base
 from .initialize import init, is_first_replica_megatron_main_rank
 from .lora_utils import is_lora_enabled
 from .model import TrainStepOutcome, forward_only, initialize_model_and_optimizer, save, train
@@ -208,6 +209,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 self.model,
                 convert_to_global_name=args.megatron_to_hf_mode == "raw",
                 translate_gpu_to_cpu=not self.args.enable_weights_backuper,
+                skip_fp8_frozen=True,
             ),
             single_tag=None if args.enable_weights_backuper else "actor",
         )
@@ -514,6 +516,7 @@ class MegatronTrainRayActor(TrainRayActor):
                     attempt=attempt,
                     ft_test_action_executor=self._ft_test_action_executor,
                 )
+            free_frozen_base(self.model)
 
             self.prof.step(rollout_id=rollout_id)
 
@@ -748,13 +751,14 @@ class MegatronTrainRayActor(TrainRayActor):
             old_ckpt_step = self.args.ckpt_step
             self.args.ckpt_step = self.args.opd_teacher_ckpt_step
 
-        _, _ = load_checkpoint(
-            self.model,
-            None,
-            None,
-            checkpointing_context={},
-            skip_load_to_model_and_opt=False,
-        )
+        with materialized_frozen_base(self.args, self.model):
+            _, _ = load_checkpoint(
+                self.model,
+                None,
+                None,
+                checkpointing_context={},
+                skip_load_to_model_and_opt=False,
+            )
         self.args.load, self.args.no_load_optim, self.args.no_load_rng, self.args.finetune = old_args
 
         if model_tag == "ref" and self.args.ref_ckpt_step is not None:
