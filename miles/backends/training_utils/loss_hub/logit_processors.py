@@ -2,6 +2,7 @@ from argparse import Namespace
 from collections.abc import Iterator
 
 import torch
+from torch.utils.checkpoint import checkpoint
 
 from miles.backends.training_utils.cp_utils import allgather_cp_redistribute, get_logits_and_tokens_offset_with_cp
 from miles.backends.training_utils.loss_hub.math_utils import calculate_log_probs_and_entropy
@@ -16,6 +17,7 @@ def get_responses(
     total_lengths: list[int],
     response_lengths: list[int],
     max_seq_lens: list[int] | None = None,
+    apply_temperature: bool = True,
 ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
     """Yield response-aligned `(logits_chunk, tokens_chunk)` pairs per sample.
 
@@ -42,7 +44,7 @@ def get_responses(
 
     if not args.true_on_policy_mode:
         # FSDP hands native bf16 here (no full-vocab fp32 buffer); chunks are upcast to fp32 downstream
-        assert logits.dtype in (torch.float32, torch.bfloat16), f"{logits.dtype}"
+        assert logits.dtype in (torch.float32, torch.bfloat16, torch.float16), f"{logits.dtype}"
     assert len(logits.shape) == 3, f"{logits.shape}"
 
     if qkv_format == "thd":
@@ -52,9 +54,9 @@ def get_responses(
         assert max_seq_lens is not None
         logits = logits.view(-1, logits.size(-1))
 
-    if logits.size(-1) > 1 and args.rollout_temperature > 0 and args.rollout_temperature != 1.0:
+    if apply_temperature and logits.size(-1) > 1 and args.rollout_temperature > 0 and args.rollout_temperature != 1.0:
         logits = logits.div(args.rollout_temperature)
-    if args.true_on_policy_mode:
+    if args.true_on_policy_mode and apply_temperature:
         if getattr(args, "bf16", False):
             logits = logits.to(torch.bfloat16)
         elif getattr(args, "fp16", False):
@@ -164,6 +166,68 @@ def get_log_probs_and_entropy(
         a list of `[R]` tensors.
     """
     assert non_loss_data
+    projection = getattr(args, "actor_projection", None)
+    if projection is not None:
+        logits = projection.gather_sequence_parallel(logits)
+        responses = list(
+            get_responses(
+                logits,
+                args=args,
+                unconcat_tokens=unconcat_tokens,
+                total_lengths=total_lengths,
+                response_lengths=response_lengths,
+                max_seq_lens=max_seq_lens,
+                apply_temperature=False,
+            )
+        )
+        lengths = [hidden.size(0) for hidden, _ in responses]
+        if len(responses) == 1:
+            hidden_states, tokens = responses[0]
+        else:
+            hidden_states = torch.cat([hidden for hidden, _ in responses])
+            tokens = torch.cat([tokens for _, tokens in responses])
+
+        temperature = args.rollout_temperature if args.rollout_temperature > 0 else 1.0
+
+        def score(hidden, labels):
+            projected = projection(hidden)
+            if temperature != 1.0:
+                projected = projected.div(temperature)
+            return calculate_log_probs_and_entropy(
+                projected,
+                labels,
+                get_parallel_state().tp.group,
+                with_entropy=with_entropy,
+                entropy_requires_grad=entropy_requires_grad,
+                chunk_size=-1,
+                true_on_policy=False,
+                vocab_size=getattr(args, "vocab_size", None),
+            )
+
+        log_prob_chunks, entropy_chunks = [], []
+        recompute = getattr(args, "recompute_chunked_tp_logprob_loss", False) and torch.is_grad_enabled()
+        for hidden, labels in zip(
+            hidden_states.split(args.log_probs_chunk_size),
+            tokens.split(args.log_probs_chunk_size),
+            strict=True,
+        ):
+            if not hidden.numel():
+                continue
+            log_prob, entropy = (
+                checkpoint(score, hidden, labels, use_reentrant=False) if recompute else score(hidden, labels)
+            )
+            log_prob_chunks.append(log_prob.reshape(-1))
+            if with_entropy:
+                entropy_chunks.append(entropy.reshape(-1))
+
+        empty = logits.new_empty(0, dtype=torch.float32)
+        flat_log_probs = torch.cat(log_prob_chunks) if log_prob_chunks else empty
+        res = {"log_probs": list(flat_log_probs.split(lengths))}
+        if with_entropy:
+            flat_entropy = torch.cat(entropy_chunks) if entropy_chunks else empty
+            res["entropy"] = list(flat_entropy.split(lengths))
+        return res
+
     parallel_state = get_parallel_state()
     log_probs_list = []
     entropy_list = []
