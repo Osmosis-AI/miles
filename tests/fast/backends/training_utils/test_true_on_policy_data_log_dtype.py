@@ -13,6 +13,7 @@ from miles.backends.training_utils import mm_data
 def _get_cp2_rollout_data(monkeypatch, response_fields):
     parallel_state = SimpleNamespace(
         intra_dp=SimpleNamespace(rank=0, size=1),
+        effective_dp=SimpleNamespace(rank=0, size=1),
         cp=SimpleNamespace(rank=0, size=2),
     )
     rollout_data = {
@@ -25,7 +26,7 @@ def _get_cp2_rollout_data(monkeypatch, response_fields):
 
     monkeypatch.setattr(data_utils, "get_parallel_state", lambda: parallel_state)
     monkeypatch.setattr(cp_utils, "get_parallel_state", lambda: parallel_state)
-    monkeypatch.setattr(data_utils, "process_rollout_data", lambda *_args: rollout_data)
+    monkeypatch.setattr(data_utils, "process_rollout_data", lambda *_args, **_kwargs: (rollout_data, None))
     monkeypatch.setattr(torch.cuda, "current_device", lambda: torch.device("cpu"))
 
     args = Namespace(
@@ -33,8 +34,10 @@ def _get_cp2_rollout_data(monkeypatch, response_fields):
         true_on_policy_mode=False,
         bf16=True,
         fp16=False,
+        enable_witness=False,
     )
-    return data_utils.get_rollout_data(args, None)
+    result, _store_get_result = data_utils.get_rollout_data(args, None)
+    return result
 
 
 def test_true_on_policy_rollout_logprob_dtype_follows_training_precision():
