@@ -54,13 +54,14 @@ _MODEL_REGISTRY = {
     "Inkling": "inkling-975b",
     "Inkling-4layer": "inkling-975b-4layer",
     "Inkling-Small": "inkling-small",
+    "Inkling-Small-4layer": "inkling-small-4layer",
 }
 
 
 @dataclass
 class ScriptArgs(U.ExecuteTrainConfig):
     run_id: str = U.create_run_id()
-    model_name: Literal["Inkling", "Inkling-4layer", "Inkling-Small"] = "Inkling"
+    model_name: Literal["Inkling", "Inkling-4layer", "Inkling-Small", "Inkling-Small-4layer"] = "Inkling"
 
     train_mode: Literal["full", "lora"] = "full"
     task: Literal["dapo_math", "geo3k"] = "dapo_math"
@@ -133,7 +134,7 @@ def _get_parallel_config(args: ScriptArgs) -> str:
             "--expert-tensor-parallel-size 1 "
         )
 
-    if args.model_name == "Inkling-4layer" and args.actor_num_nodes == 1:
+    if args.model_name in ("Inkling-4layer", "Inkling-Small-4layer") and args.actor_num_nodes == 1:
         return (
             "--tensor-model-parallel-size 4 "
             "--sequence-parallel "
