@@ -381,16 +381,22 @@ PERF_ARGS=(
     --max-tokens-per-gpu 4096
 )
 
+# Two deviations from the BF16 Inkling LoRA lane, both required by the NVFP4
+# Marlin (W4A16) fallback on Hopper:
+#   - no explicit --sglang-moe-runner-backend: an explicit `triton` disables
+#     the per-layer auto selection (NVFP4 experts -> marlin, excluded BF16
+#     experts -> triton) and ModelOptNvFp4FusedMoEMethod then refuses SM90;
+#   - no --sglang-ep-size 4: the marlin routed GEMM hits an illegal memory
+#     access under EP>1 during CUDA-graph capture; EP=1 (TP-sharded experts)
+#     matches the validated H200 NVFP4 serving lane.
 SGLANG_ARGS=(
     --rollout-num-gpus-per-engine 4
-    --sglang-ep-size 4
     --sglang-mem-fraction-static 0.65
     --sglang-max-running-requests 32
     --sglang-max-total-tokens 320000
     --sglang-cuda-graph-max-bs 64
     --sglang-max-mamba-cache-size 256
     --sglang-attention-backend fa4
-    --sglang-moe-runner-backend triton
     --sglang-mamba-scheduler-strategy extra_buffer
     --sglang-enable-multimodal
     --sglang-context-length 1024
