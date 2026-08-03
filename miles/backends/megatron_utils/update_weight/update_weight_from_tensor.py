@@ -68,7 +68,13 @@ class UpdateWeightFromTensor:
         )
         if self.is_lora:
             self._lora_config = build_lora_sync_config(args)
-            self._lora_loaded = False
+            # --lora-adapter-path makes the engine preload the adapter under
+            # LORA_ADAPTER_NAME (sglang_engine.py: kwargs["lora_paths"]), so it is
+            # already registered before the first sync. Starting this flag at False
+            # would skip the unload below and the first push would come back as
+            # 400 "Failed to load LoRA adapter miles_lora because it is already
+            # loaded", killing every resume from a saved adapter.
+            self._lora_loaded = getattr(args, "lora_adapter_path", None) is not None
             self._lora_base_synced = False
 
         # Create IPC gather groups within megatron.
