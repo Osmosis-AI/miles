@@ -762,8 +762,27 @@ def _compute_server_args(
         kwargs["max_lora_rank"] = max(getattr(args, "lora_rank", 0), 1)
         kwargs["lora_target_modules"] = convert_target_modules_to_hf(args.target_modules)
 
-        if args.lora_adapter_path is not None:
+        if args.lora_adapter_path is not None and getattr(args, "debug_rollout_only", False):
+            # Rollout-only: nothing will ever sync weights in, so the engine has to
+            # load the adapter from disk itself.
             kwargs["lora_paths"] = {LORA_ADAPTER_NAME: args.lora_adapter_path}
+        elif args.lora_adapter_path is not None:
+            # Training: the trainer restores this same adapter into Megatron and pushes
+            # it via update_weights before the first rollout, so preloading it here is
+            # redundant -- and actively harmful. It registers LORA_ADAPTER_NAME from a
+            # file, and the trainer's first sync then has to reconcile with it: first as
+            # a 400 "already loaded", then (once that was handled by unloading first) as
+            # an engine-side adapter that disagrees with the trainer's. Both resume
+            # attempts died one rollout after the first training step with
+            #   Assertion `probability tensor contains inf, nan or element < 0` failed
+            # while train_rollout_kl sat at 2.3e-3 against the 7e-4 of a fresh run --
+            # i.e. the two engines were holding different adapters. Fresh runs never hit
+            # it because there is nothing to preload. Leaving lora_paths unset makes the
+            # resume path byte-identical to the fresh path.
+            logger.info(
+                "LoRA adapter_path set for a training run; skipping engine preload "
+                "(the trainer syncs the adapter before the first rollout)"
+            )
         else:
             logger.info("No pre-trained LoRA adapter_path provided, will use random initial weights")
 
