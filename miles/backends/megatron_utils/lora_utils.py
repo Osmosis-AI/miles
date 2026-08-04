@@ -512,6 +512,30 @@ def load_lora_adapter(
         logger.info(f"Loaded {loaded} adapter tensors from Megatron-native checkpoint: {native_path}")
 
         iteration = _load_training_state(adapter_dir, optimizer, opt_param_scheduler)
+
+        # The loop above wrote straight into param.data, i.e. it changed the parameters
+        # outside the optimizer. With a main-params optimizer (fp16/bf16, and anything
+        # under --use-precision-aware-optimizer) the fp32 master copies were built from
+        # the model at construction time -- that is, from the *randomly initialised*
+        # adapter -- and know nothing about what we just loaded. The saved training
+        # state cannot repair them either: it carries only param_groups, no `state`
+        # and no master params.
+        #
+        # Left alone, the first optimizer step writes those stale masters back over the
+        # restored adapter, the result is pushed to the rollout engine by update_weights,
+        # and the next rollout dies in the sampler with
+        #   Assertion `probability tensor contains either inf, nan or element < 0`.
+        # That is one rollout after the first training step, every time, on resume only
+        # -- fresh runs are consistent because masters and model share the same init.
+        #
+        # Megatron's own docstring for this call is "Call whenever the parameters are
+        # changed outside of the optimizer"; _load_checkpoint_hf already does exactly
+        # this after loading HF weights (checkpoint.py). The LoRA path just missed it.
+        # The base optimizer implements it as a no-op, so this is safe unconditionally.
+        if optimizer is not None:
+            optimizer.reload_model_params()
+            logger.info("Refreshed optimizer main params from the restored LoRA adapter")
+
         return True, iteration
 
     # ---- HF PEFT format (future work) ----
