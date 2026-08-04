@@ -417,10 +417,19 @@ MISC_ARGS=(
     --colocate
 )
 
+# --ci-disable-weight-update-checker matters beyond CI noise: --ci-test would
+# force check_weight_update_equal on, which forces a full base-weight sync on
+# every update. The trainer's frozen base is BF16 while the engine's routed
+# experts are NVFP4-packed (last dim H/2), so a base push crashes
+# _load_per_expert_param with a 3072-vs-6144 shape mismatch. Disabling the
+# base checker lets update_weights take its skip_base_sync path (LoRA +
+# colocate + persistent rollout weights): only BF16 adapters flow, verified
+# per-tensor by --check-lora-weight-equal.
 CI_ARGS=(
     --ci-test
     --ci-disable-logprobs-checker
     --ci-disable-kl-checker
+    --ci-disable-weight-update-checker
     --check-lora-weight-equal
     --check-weight-update-skip-list audio visual _w1_delta _a_cat
     --no-offload-rollout
