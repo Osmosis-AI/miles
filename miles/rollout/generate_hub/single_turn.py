@@ -19,7 +19,12 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     assert sample.status in {Sample.Status.PENDING, Sample.Status.ABORTED}, f"{sample.status=}"
     url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
 
-    prompt_ids = compute_prompt_ids_from_sample(input.state, sample)
+    prompt_ids = compute_prompt_ids_from_sample(
+        input.state,
+        sample,
+        tools=(sample.metadata or {}).get("tools"),
+        chat_template_kwargs=getattr(args, "apply_chat_template_kwargs", None),
+    )
 
     # Handle Partial Rollout resuming
     if len(sample.response) > 0:

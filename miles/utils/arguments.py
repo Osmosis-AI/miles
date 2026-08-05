@@ -477,6 +477,28 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--pre-generate-function-path",
+                action="append",
+                dest="pre_generate_function_paths",
+                default=[],
+                help=(
+                    "Composable hook called immediately before generation. Repeat the flag "
+                    "to apply multiple hooks in order. Each hook receives GenerateFnInput "
+                    "and may mutate it or return a replacement."
+                ),
+            )
+            parser.add_argument(
+                "--post-generate-function-path",
+                action="append",
+                dest="post_generate_function_paths",
+                default=[],
+                help=(
+                    "Composable hook called after generation and before reward scoring. "
+                    "Repeat the flag to apply multiple hooks in order. Each hook receives "
+                    "(GenerateFnInput, GenerateFnOutput) and may mutate the output or return a replacement."
+                ),
+            )
+            parser.add_argument(
                 "--custom-rollout-log-function-path",
                 type=str,
                 default=None,
@@ -1151,6 +1173,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--opd-teacher-ckpt-step", type=int, default=None, help="The checkpoint step for OPD teacher model."
             )
+            parser.add_argument(
+                "--opsd-private-context-key",
+                type=str,
+                default="opsd_targeted_feedback",
+                help="Sample metadata key containing teacher-only feedback for privileged OPD.",
+            )
             return parser
 
         def add_lora_arguments(parser):
@@ -1800,10 +1828,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 args_partial, _ = parser.parse_known_args()
             except SystemExit:
                 return parser
-            for path in [
-                args_partial.rollout_function_path,
-                args_partial.custom_generate_function_path,
-            ]:
+            paths = dict.fromkeys(
+                [
+                    args_partial.rollout_function_path,
+                    args_partial.custom_generate_function_path,
+                    *args_partial.pre_generate_function_paths,
+                    *args_partial.post_generate_function_paths,
+                ]
+            )
+            for path in paths:
                 try:
                     fn = load_function(path)
                 except (ModuleNotFoundError, ValueError):
@@ -1847,8 +1880,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
         parser = add_prefill_decode_disaggregation_arguments(parser)
         parser = add_ci_arguments(parser)
         parser = add_custom_megatron_plugins_arguments(parser)
-        if enable_experimental_rollout_refactor():
-            parser = add_user_provided_function_arguments(parser)
+        parser = add_user_provided_function_arguments(parser)
 
         reset_arg(
             parser,

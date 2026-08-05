@@ -8,7 +8,12 @@ import pytest
 from miles.utils.arguments import _maybe_apply_dumper_overrides, get_miles_extra_args_provider
 from miles.utils.misc import function_registry
 
-PATH_ARGS = ["--rollout-function-path", "--custom-generate-function-path"]
+PATH_ARGS = [
+    "--rollout-function-path",
+    "--custom-generate-function-path",
+    "--pre-generate-function-path",
+    "--post-generate-function-path",
+]
 REQUIRED_ARGS = ["--rollout-batch-size", "64"]
 
 

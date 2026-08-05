@@ -8,12 +8,13 @@ from typing import Any
 import numpy as np
 import pybase64
 
+from miles.backends.megatron_utils.lora_utils import LORA_ADAPTER_NAME, is_lora_enabled
 from miles.utils.processing_utils import encode_image_for_rollout_engine
 from miles.utils.types import Sample
 
 
 # Make this an isolated function because users may want to compute their own
-def compute_prompt_ids_from_sample(state, sample, tools=None):
+def compute_prompt_ids_from_sample(state, sample, tools=None, chat_template_kwargs=None):
     prompt = sample.prompt
 
     if state.processor and sample.multimodal_inputs and any(v is not None for v in sample.multimodal_inputs.values()):
@@ -28,8 +29,14 @@ def compute_prompt_ids_from_sample(state, sample, tools=None):
         return prompt_ids
     else:
         if not isinstance(prompt, str):
+            template_kwargs = dict(chat_template_kwargs or {})
+            if tools is not None:
+                template_kwargs["tools"] = tools
             prompt = state.tokenizer.apply_chat_template(
-                prompt, tokenize=False, add_generation_prompt=True, tools=tools
+                prompt,
+                tokenize=False,
+                add_generation_prompt=True,
+                **template_kwargs,
             )
 
         return state.tokenizer.encode(prompt, add_special_tokens=False)
@@ -55,6 +62,8 @@ def compute_request_payload(
         "return_routed_experts": args.use_rollout_routing_replay,
         "return_indexer_topk": args.use_rollout_indexer_replay,
     }
+    if is_lora_enabled(args):
+        payload["lora_path"] = LORA_ADAPTER_NAME
     if image_data := (multimodal_inputs or {}).get("images"):
         payload["image_data"] = [encode_image_for_rollout_engine(image) for image in image_data]
 

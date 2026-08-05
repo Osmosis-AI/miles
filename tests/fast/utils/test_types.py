@@ -105,3 +105,21 @@ class TestStripLastOutputTokens:
         original_tokens = list(s.tokens)
         s.strip_last_output_tokens(-1, tokenizer)
         assert s.tokens == original_tokens
+
+
+def test_runtime_metadata_is_not_persisted():
+    sample = Sample(runtime_metadata={"private": [1, 2, 3]})
+
+    serialized = sample.to_dict()
+    restored = Sample.from_dict({**serialized, "runtime_metadata": {"injected": True}})
+
+    assert "runtime_metadata" not in serialized
+    assert restored.runtime_metadata == {}
+
+
+def test_reset_for_retry_preserves_runtime_metadata():
+    sample = Sample(runtime_metadata={"attempt": 1})
+
+    sample.reset_for_retry()
+
+    assert sample.runtime_metadata == {"attempt": 1}

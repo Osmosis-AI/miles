@@ -33,6 +33,9 @@ class Sample:
     )
     remove_sample: bool = False
     teacher_log_probs: list[float] | None = None  # Log probabilities from teacher model for OPD
+    # Runtime-only scratch space for rollout extensions. This is deliberately
+    # excluded from Sample.to_dict() and training data.
+    runtime_metadata: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     class Status(Enum):
         PENDING = "pending"
@@ -128,6 +131,7 @@ class Sample:
 
     def to_dict(self):
         value = self.__dict__.copy()
+        value.pop("runtime_metadata", None)
         value["status"] = self.status.value
         value["spec_info"] = self.spec_info.to_dict()
         value["prefix_cache_info"] = self.prefix_cache_info.to_dict()
@@ -136,6 +140,7 @@ class Sample:
     @staticmethod
     def from_dict(data: dict):
         data = dict(data)
+        data.pop("runtime_metadata", None)
         data["status"] = Sample.Status(data["status"])
         data["spec_info"] = Sample.SpecInfo.from_dict(data.get("spec_info", {}))
         data["prefix_cache_info"] = Sample.PrefixCacheInfo.from_dict(data.get("prefix_cache_info", {}))
@@ -208,8 +213,8 @@ class Sample:
         """Reset generated outputs so the original prompt can be re-sampled.
 
         Keeps identity / prompt fields (group_index, index, prompt, label,
-        multimodal_inputs, metadata, generate_function_path, session_id) and
-        restores everything else to dataclass defaults.
+        multimodal_inputs, metadata, runtime_metadata, generate_function_path,
+        session_id) and restores everything else to dataclass defaults.
         """
         self.tokens = []
         self.multimodal_train_inputs = None

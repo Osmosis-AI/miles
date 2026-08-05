@@ -99,6 +99,26 @@ Helpers:
   `--generate-execute-tool-function-path`, `--generate-multi-samples`.
 - **`benchmarkers.py`**: forces random output sequence length for benchmarking.
 
+### Generation hooks
+
+Use `--pre-generate-function-path` and `--post-generate-function-path` for logic
+that should compose with any generator instead of replacing it. Repeat either
+flag to run multiple hooks in order. Pre-hooks run immediately before the
+generator; post-hooks run after the generation semaphore is released and
+before normal reward scoring. Both rollout implementations support them.
+
+```bash
+--custom-generate-function-path my_package.generate
+--pre-generate-function-path my_package.pre_generate
+--post-generate-function-path my_package.post_generate
+```
+
+Hooks may be synchronous or asynchronous. Pre-hooks receive
+`GenerateFnInput`; post-hooks receive `(GenerateFnInput, GenerateFnOutput)`.
+They may mutate their input and return `None`, or return a replacement object
+of the same type. `Sample.runtime_metadata` is available for hook-local state
+and is excluded from `Sample.to_dict()` and training data.
+
 ---
 
 ## The OpenAI chat endpoint
