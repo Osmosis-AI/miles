@@ -15,6 +15,11 @@ from miles.rollout.base_types import (
     RolloutFnTrainOutput,
 )
 from miles.rollout.generate_hub.single_turn import generate
+from miles.rollout.generation_hooks import (
+    apply_post_generate_hooks,
+    apply_pre_generate_hooks,
+    load_generate_hooks,
+)
 from miles.rollout.inference_rollout.compatibility import load_generate_function
 from miles.rollout.rm_hub import async_rm, batched_async_rm
 from miles.utils.processing_utils import load_processor, load_tokenizer
@@ -44,6 +49,12 @@ class GenerateState:
         )
 
         self.generate_function = load_generate_function(args.custom_generate_function_path) or generate
+        self.pre_generate_hooks = load_generate_hooks(
+            getattr(args, "pre_generate_function_paths", None)
+        )
+        self.post_generate_hooks = load_generate_hooks(
+            getattr(args, "post_generate_function_paths", None)
+        )
 
         self.reset()
 
@@ -79,16 +90,18 @@ async def generate_and_rm(
             return sample
 
         logger.debug(f"{log_prefix} Acquired semaphore, calling generate_function")
-        output = await state.generate_function(
-            GenerateFnInput(
-                state=state,
-                sample=sample,
-                sampling_params=deepcopy(sampling_params),
-                evaluation=evaluation,
-            )
+        generate_input = GenerateFnInput(
+            state=state,
+            sample=sample,
+            sampling_params=deepcopy(sampling_params),
+            evaluation=evaluation,
         )
-        sample = output.samples
+        generate_input = await apply_pre_generate_hooks(state.pre_generate_hooks, generate_input)
+        output = await state.generate_function(generate_input)
         logger.debug(f"{log_prefix} generate_function returned")
+
+    output = await apply_post_generate_hooks(state.post_generate_hooks, generate_input, output)
+    sample = output.samples
 
     # TODO change to `if not args.group_rm: do reward model` for more clarity after the refactor below
     # for the rm that need the whole group, we will not do the rm here

@@ -72,6 +72,7 @@ def _merge_sample_pair(a: Sample, b: Sample, tokenizer) -> Sample:
             weight_versions=a.weight_versions + b.weight_versions,
             rollout_log_probs=a.rollout_log_probs + [0.0] * obs_len + b.rollout_log_probs,
             teacher_log_probs=_merge_teacher_log_probs(),
+            runtime_metadata={},
             rollout_routed_experts=b.rollout_routed_experts,
             rollout_indexer_topk=b.rollout_indexer_topk,
             remove_sample=_merge_equal_value("remove_sample"),

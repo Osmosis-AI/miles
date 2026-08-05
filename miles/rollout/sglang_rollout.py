@@ -14,8 +14,13 @@ from packaging.version import parse
 from tqdm import tqdm
 
 from miles.backends.megatron_utils.lora_utils import LORA_ADAPTER_NAME, is_lora_enabled
-from miles.rollout.base_types import GenerateFnInput, RolloutFnEvalOutput, RolloutFnTrainOutput
+from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput, RolloutFnEvalOutput, RolloutFnTrainOutput
 from miles.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
+from miles.rollout.generation_hooks import (
+    apply_post_generate_hooks,
+    apply_pre_generate_hooks,
+    load_generate_hooks,
+)
 from miles.rollout.inference_rollout.compatibility import load_generate_function
 from miles.utils import dumper_utils
 from miles.utils.async_utils import run
@@ -71,6 +76,12 @@ class GenerateState(metaclass=SingletonMeta):
             args.hf_checkpoint, chat_template_path=args.chat_template_path, trust_remote_code=True
         )
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
+        self.pre_generate_hooks = load_generate_hooks(
+            getattr(args, "pre_generate_function_paths", None)
+        )
+        self.post_generate_hooks = load_generate_hooks(
+            getattr(args, "post_generate_function_paths", None)
+        )
 
         self.semaphore = asyncio.Semaphore(
             args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
@@ -262,13 +273,26 @@ async def generate_and_rm(
             custom_func_path = getattr(sample, "generate_function_path", None) or args.custom_generate_function_path
 
             generate_fn = load_generate_function(custom_func_path) if custom_func_path else None
+            generate_input = GenerateFnInput(
+                state=state,
+                sample=sample,
+                sampling_params=copy.deepcopy(sampling_params),
+                evaluation=evaluation,
+            )
+            generate_input = await apply_pre_generate_hooks(state.pre_generate_hooks, generate_input)
             if generate_fn is not None:
-                output = await generate_fn(
-                    GenerateFnInput(state=state, sample=sample, sampling_params=sampling_params, evaluation=evaluation)
-                )
-                sample = output.samples
+                output = await generate_fn(generate_input)
             else:
-                sample = await generate(args, sample, sampling_params)
+                output = GenerateFnOutput(
+                    samples=await generate(
+                        args,
+                        generate_input.sample,
+                        generate_input.sampling_params,
+                    )
+                )
+
+    output = await apply_post_generate_hooks(state.post_generate_hooks, generate_input, output)
+    sample = output.samples
 
     # for the rm that need the whole group, we will not do the rm here
     if args.group_rm:

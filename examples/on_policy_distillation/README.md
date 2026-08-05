@@ -36,6 +36,30 @@ This example shows how to run **on-policy distillation (OPD)** using miles. A sm
 - `run-qwen3-8B-opd.sh` launches an SGLang teacher server, then submits a Ray job that runs `train.py`.
 - `run-qwen3-8B-opd-megatron.sh` uses Megatron-loaded teacher model (no external server needed).
 
+## Privileged-Context Self-Distillation
+
+Miles can generate from a public prompt and then score that exact student trace
+under private feedback using the same rollout model and active LoRA adapter:
+
+```bash
+--use-opd
+--opd-type sglang
+--pre-generate-function-path miles.rollout.privileged_opd.reserve_teacher_context
+--post-generate-function-path miles.rollout.privileged_opd.score_with_private_context
+--custom-reward-post-process-path miles.rollout.privileged_opd.post_process_rewards
+--rm-url self
+--opsd-private-context-key opsd_targeted_feedback
+```
+
+The hook mechanism is independent of `--custom-generate-function-path`, so
+model-specific generators and retry policies stay in place. The pre-hook
+reserves enough context for private scoring and hides the private field from
+the generator; the post-hook verifies exact token alignment and attaches the
+teacher scores. The default hooks expect completed, text-only, single-turn
+OpenAI message traces and render with the same tokenizer, tools, and
+`--apply-chat-template-kwargs`. More specialized generators can provide their
+own hooks. Over-length or truncated traces are rejected.
+
 ## Running the example
 
 ### Using SGLang Teacher (External Server)
