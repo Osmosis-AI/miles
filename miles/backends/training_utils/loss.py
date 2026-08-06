@@ -73,6 +73,7 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
         loss_masks=loss_masks,
         total_lengths=total_lengths,
         response_lengths=response_lengths,
+        max_seq_lens=max_seq_lens,
         values=values,
     )
 
@@ -98,6 +99,7 @@ def loss_function(
     num_microbatches: int,
     logits: torch.Tensor,
     apply_megatron_loss_scaling: bool = False,
+    num_rollouts: int | None = None,
 ) -> tuple[torch.Tensor, int | torch.Tensor, dict[str, list[str] | torch.Tensor]]:
     """Dispatch to the configured loss and rescale for Megatron integration.
 
@@ -113,6 +115,8 @@ def loss_function(
             keys required by the selected loss function.
         num_microbatches: Number of gradient accumulation steps.
         logits: Model outputs (policy or value head).
+        num_rollouts: This step's rollout count (total across DP), used as
+            the loss normalizer; None falls back to the legacy batch/args value.
 
     Returns:
         Tuple of `(scaled_loss, normalizer, logging_dict)` where:
@@ -133,6 +137,7 @@ def loss_function(
         args.calculate_per_token_loss,
         args.qkv_format,
         batch.get("max_seq_lens", None),
+        denominators=batch.get("rollout_mask_sums", None),
     )
 
     func = get_loss_function(args)
@@ -153,8 +158,11 @@ def loss_function(
         loss = loss + 0 * logits.sum()
 
     # Here we need to divide by cp_size because to cancel the multiply in Megatron.
-    assert args.use_dynamic_global_batch_size == ("dynamic_global_batch_size" in batch)
-    global_batch_size = batch.get("dynamic_global_batch_size", args.global_batch_size)
+    if num_rollouts is not None:
+        global_batch_size = num_rollouts
+    else:
+        assert args.use_dynamic_global_batch_size == ("dynamic_global_batch_size" in batch)
+        global_batch_size = batch.get("dynamic_global_batch_size", args.global_batch_size)
     # Multi-LoRA: samples enter the gradient buffers with weight 1; per-adapter
     # normalization (1/adapter_global_batch_size, a constant known in advance)
     # is applied to the accumulated slot gradient at optimizer-step time.
@@ -180,10 +188,7 @@ def loss_function(
         {
             "keys": list(log.keys()),
             "values": torch.tensor(
-                [
-                    num_samples if not args.calculate_per_token_loss else num_tokens,
-                ]
-                + list(log.values()),
+                [num_samples if not args.calculate_per_token_loss else num_tokens] + list(log.values()),
                 device=logits.device,
             ),
         },

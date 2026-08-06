@@ -5,8 +5,7 @@ These cover the Python-side policy and label pipeline:
 * `strip_run_ci_prefix`: empty input, prefix stripping, silent skip of
   workflow-only labels, warning on other non-prefixed inputs.
 * `resolve_policy`: explicit cadence + raw labels -> selection and fast-fail.
-* The pr-test.yml seam: one adapter resolves trigger facts and every stage
-  consumes its outputs.
+* The PR workflow seams: one adapter resolves trigger facts and every CUDA/ROCm stage consumes its outputs.
 * `filter_tests`: include-set selection with the "empty labels means always
   run" semantic; a scope subtraction is not a per-test veto.
 * `CI_SUITES`: locked to the new taxonomy including the
@@ -179,9 +178,9 @@ class TestResolvePolicy:
             (REGULAR_CADENCE, {"run-ci-image"}, _ALL - {"long", "ft-short", "ft-long"}, False),
             (REGULAR_CADENCE, {"run-ci-all"}, _ALL, False),
             (REGULAR_CADENCE, {"run-ci-image", "run-ci-all"}, _ALL, False),
-            (NIGHTLY_CADENCE, set(), _ALL - {"ft-long"}, True),
-            (NIGHTLY_CADENCE, {"nightly"}, _ALL - {"ft-long"}, True),
-            (NIGHTLY_CADENCE, {"run-ci-image", "nightly"}, _ALL - {"ft-long"}, True),
+            (NIGHTLY_CADENCE, set(), _ALL - {"long", "ft-long"}, True),
+            (NIGHTLY_CADENCE, {"nightly"}, _ALL - {"long", "ft-long"}, True),
+            (NIGHTLY_CADENCE, {"run-ci-image", "nightly"}, _ALL - {"long", "ft-long"}, True),
             (NIGHTLY_CADENCE, {"nightly", "run-ci-all"}, _ALL, True),
         ],
     )
@@ -208,14 +207,13 @@ class TestResolvePolicy:
         [
             (REGULAR_CADENCE, {"run-ci-image", "run-ci-long"}, _ALL - {"ft-short", "ft-long"}),
             (REGULAR_CADENCE, {"run-ci-image", "run-ci-ft-short"}, _ALL - {"long", "ft-long"}),
-            (NIGHTLY_CADENCE, {"nightly", "run-ci-ft-long"}, _ALL),
+            (NIGHTLY_CADENCE, {"nightly", "run-ci-long"}, _ALL - {"ft-long"}),
+            (NIGHTLY_CADENCE, {"nightly", "run-ci-ft-long"}, _ALL - {"long"}),
             (REGULAR_CADENCE, {"run-ci-image", "run-ci-ft-short", "run-ci-ft-long"}, _ALL - {"long"}),
-            (NIGHTLY_CADENCE, {"run-ci-ft-long"}, _ALL),
+            (NIGHTLY_CADENCE, {"run-ci-ft-long"}, _ALL - {"long"}),
         ],
     )
     def test_explicit_domain_label_wins_over_scope_subtraction(self, cadence, labels, expected):
-        # Asking for long or FT coverage on an image bump must not be silently
-        # dropped: explicit requests are unioned in after the subtraction.
         assert resolve_policy(cadence, labels).include_labels == expected
 
     @pytest.mark.parametrize(
@@ -305,6 +303,57 @@ class TestWorkflowScopeSeam:
         assert "github.event.schedule || github.run_id" in workflow
 
 
+class TestRocmWorkflowScopeSeam:
+    @staticmethod
+    def _workflow() -> str:
+        return (Path(__file__).resolve().parents[3] / ".github" / "workflows" / "pr-test-rocm.yml").read_text()
+
+    def test_pr_nightly_and_dispatch_share_policy(self):
+        workflow = self._workflow()
+        assert (
+            "pull_request_target:\n    types: [opened, synchronize, reopened, ready_for_review, labeled]" in workflow
+        )
+        configured = set(re.findall(r"^\s+- cron: ['\"]([^'\"]+)['\"]\s*$", workflow, flags=re.MULTILINE))
+        assert configured == set(SCHEDULE_POLICIES)
+
+        policy_block = workflow.split("resolve-ci-policy:", 1)[1].split("resolve-ci-image:", 1)[0]
+        assert "allow_self_hosted: ${{ steps.authorize.outputs.allow_self_hosted }}" in policy_block
+        assert '"$HEAD_REPOSITORY" != "$BASE_REPOSITORY"' in policy_block
+        assert "ALLOW_SELF_HOSTED=false" in policy_block
+        assert 'test("^run-ci-[A-Za-z0-9][A-Za-z0-9_.-]*$")' in policy_block
+        assert "EVENT_NAME: ${{ github.event_name == 'pull_request_target' && 'pull_request'" in policy_block
+        assert "SCHEDULE: ${{ github.event.schedule || '' }}" in policy_block
+        assert "PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}" in policy_block
+        assert "run: python -m tests.ci.ci_policy" in policy_block
+        assert "github.event.schedule || github.run_id" in workflow
+
+    def test_stage_consumes_policy_and_preserves_manual_full_scope(self):
+        workflow = self._workflow()
+        stage = workflow.split("  stage-c-4-gpu-mi300x:", 1)[1]
+        command = stage.split("execute_command:", 1)[1].split("secrets:", 1)[0]
+
+        assert "needs: [resolve-ci-policy, resolve-ci-image]" in stage
+        assert "if: needs.resolve-ci-policy.outputs.allow_self_hosted == 'true'" in stage
+        assert "partition_id: [0, 1]" in stage
+        assert "--auto-partition-size 2" in command
+        assert "format('refs/pull/{0}/merge', github.event.pull_request.number)" in stage
+        assert "--cadence ${{ needs.resolve-ci-policy.outputs.cadence }}" in command
+        assert "--labels ${{ needs.resolve-ci-policy.outputs.raw_labels }}" in command
+        assert "${{ github.event_name == 'workflow_dispatch' && '--match-all-labels' || '' }}" in command
+        secret_gate = (
+            "(github.event_name != 'pull_request_target' || "
+            "github.event.pull_request.head.repo.full_name == github.repository)"
+        )
+        assert f"WANDB_API_KEY: ${{{{ {secret_gate} && secrets.WANDB_API_KEY || '' }}}}" in stage
+        assert "--labels amd" not in command
+        assert "if: github.event_name == 'workflow_dispatch'" not in workflow
+
+        reusable = (Path(__file__).resolve().parents[3] / ".github" / "workflows" / "_run-ci-rocm.yml").read_text()
+        assert "checkout_ref:" in reusable
+        assert "ref: ${{ inputs.checkout_ref }}" in reusable
+        assert "persist-credentials: false" in reusable
+
+
 # --- CLI seam: local nightly alias and invalid-suite exit behavior -----------
 
 
@@ -334,6 +383,7 @@ class TestRunSuiteCLI:
         assert alias_policy == explicit_policy
         assert "cadence='nightly' bypass_fastfail=True" in alias_policy
         assert "'ft-short'" in alias_policy
+        assert "'long'" not in alias_policy
         assert "'ft-long'" not in alias_policy
         assert "Continue on error: True" in alias.stdout
 
@@ -595,7 +645,7 @@ class TestFilterTestsBroadScopes:
             "tests/e2e/megatron.py",
         }
 
-    def test_nightly_scope_selects_ft_short_but_not_ft_only_soak(self, broad_scope_tests):
+    def test_nightly_scope_excludes_long_and_ft_long_but_selects_ft_short(self, broad_scope_tests):
         enabled, _ = filter_tests(
             broad_scope_tests,
             HWBackend.CUDA,
@@ -603,14 +653,10 @@ class TestFilterTestsBroadScopes:
             nightly=True,
             labels=set(resolve_policy(NIGHTLY_CADENCE, set()).include_labels),
         )
-        # ft/long.py again enters via `long`; a soak test that must never
-        # run at nightly must carry only FT labels.
         assert _names(enabled) == {
             "tests/e2e/always.py",
             "tests/e2e/megatron.py",
-            "tests/e2e/long.py",
             "tests/e2e/ft/short.py",
-            "tests/e2e/ft/long.py",
         }
 
     def test_subtracted_only_test_drops_out_entirely(self):

@@ -6,9 +6,9 @@ import random
 import re
 
 import numpy as np
-import ray
 
 from miles.ray.rollout.train_data_conversion import split_train_data_by_dp_raw
+from miles.utils import object_store
 from .audit_utils.witness.allocator import WitnessInfo
 
 try:
@@ -17,10 +17,8 @@ except ImportError:
     pq = None
 
 from miles.utils import chat_template_utils
-from miles.utils.processing_utils import call_processor
 from miles.utils.types import MultimodalTypes, Sample
 
-from .timer import Timer
 
 __all__ = ["Dataset"]
 
@@ -110,7 +108,7 @@ def filter_long_prompt(origin_samples: list[Sample], tokenizer, processor, max_l
                 if len(input_ids) <= max_length:
                     filtered_samples.append(sample)
         if multimodal:
-            from slime.utils.processing_utils import process_vision_info
+            from miles.utils.processing_utils import process_vision_info
 
             for sample in multimodal:
                 multimodal_inputs = process_vision_info(sample.prompt, processor)
@@ -295,9 +293,14 @@ def process_rollout_data(
     dp_rank,
     dp_size,
     witness_info: WitnessInfo | None,
-):
+) -> tuple[dict, object_store.ObjectStoreGetResult]:
+    from miles.ray.rollout.train_data_conversion import process_rollout_data_shard
+
+    store = object_store.get_instance()
+
     if args.delay_split_train_data_by_dp:
-        raw = ray.get(rollout_data_ref.inner)
+        get_result = store.get(rollout_data_ref)
+        raw = get_result.value
         if (x := witness_info) is not None:
             raw = {**raw, "seq_witness_ids": x.witness_ids}
         raw = split_train_data_by_dp_raw(args, raw, dp_size=dp_size)
@@ -305,13 +308,14 @@ def process_rollout_data(
     else:
         assert len(rollout_data_ref) == dp_size
         assert witness_info is None
-        rollout_data = ray.get(rollout_data_ref[dp_rank].inner)
+        get_result = store.get(rollout_data_ref[dp_rank])
+        rollout_data = dict(get_result.value)
 
-    partition = rollout_data.pop("partition")
-    total_lengths = rollout_data["total_lengths"]
+    return process_rollout_data_shard(args, rollout_data), get_result
 
-    # save the seqlen of the whole rollout batch
-    Timer().seq_lens = total_lengths
-    rollout_data["total_lengths"] = [total_lengths[i] for i in partition]
 
-    return rollout_data
+def remove_rollout_data_refs(args, rollout_data_pack: dict) -> None:
+    store = object_store.get_instance()
+    data_ref = rollout_data_pack["data_ref"]
+    for ref in data_ref if isinstance(data_ref, list) else [data_ref]:
+        store.remove(ref)
