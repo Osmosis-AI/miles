@@ -37,7 +37,11 @@ def main() -> None:
     instance_id = args.task_dir.name
 
     record = {
-        "prompt": instruction,
+        # Message-list form: the checkpoint is a VL class so miles loads a
+        # processor, and Dataset then requires list prompts (str is rejected).
+        # The agent never sees this prompt on the Harbor path — instruction.md
+        # in the task dir is the real prompt; this mirrors it for bookkeeping.
+        "prompt": [{"role": "user", "content": instruction}],
         "metadata": {
             "instance_id": instance_id,
             "agent_name": args.agent_name,
