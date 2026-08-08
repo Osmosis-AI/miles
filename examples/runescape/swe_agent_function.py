@@ -93,6 +93,8 @@ async def run(
     # is mean XP over the full episode — killing a long conversation zeroes
     # legitimately earned XP. The trainer truncates to --max-seq-len on its own
     # (Sample.Status.TRUNCATED), which is the correct decoupling.
+    # NOTE: it also arrives via the {**metadata} spread above, so pop it.
+    request.pop("max_seq_len", None)
 
     session_server_id = metadata.get("session_server_id")
     if session_server_id is not None:
