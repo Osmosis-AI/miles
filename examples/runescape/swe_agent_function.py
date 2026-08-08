@@ -87,9 +87,12 @@ async def run(
         "sampling_params": request_kwargs,
     }
 
-    max_seq_len = metadata.get("max_seq_len")
-    if max_seq_len is not None:
-        request["max_seq_len"] = int(max_seq_len)
+    # RuneBench: deliberately do NOT forward max_seq_len. On the Harbor side it
+    # becomes an agent kill switch (SequenceLengthLimitExceeded, reward=0,
+    # verifier skipped), but our episodes are wall-clock bounded and the reward
+    # is mean XP over the full episode — killing a long conversation zeroes
+    # legitimately earned XP. The trainer truncates to --max-seq-len on its own
+    # (Sample.Status.TRUNCATED), which is the correct decoupling.
 
     session_server_id = metadata.get("session_server_id")
     if session_server_id is not None:
