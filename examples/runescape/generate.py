@@ -178,6 +178,16 @@ def log_artifacts_to_mlflow(samples: list[Sample], rollout_id: int, args) -> Non
             report = dict(_eval_report(sample))
             report["exit_status"] = sample.metadata.get("exit_status", "")
             report["trial_dir"] = sample.metadata.get("trial_dir", "")
+            # eval_report is numeric-only (harbor validates it); the tracker
+            # series and metadata live in reward_full.json in the trial dir.
+            trial_dir = sample.metadata.get("trial_dir", "")
+            if trial_dir:
+                full = Path(trial_dir) / "verifier" / "reward_full.json"
+                if full.is_file():
+                    try:
+                        report["full"] = json.loads(full.read_text())
+                    except (OSError, json.JSONDecodeError):
+                        pass
             (sample_dir / "reward.json").write_text(json.dumps(report, indent=2))
 
             if i in video_indices:
