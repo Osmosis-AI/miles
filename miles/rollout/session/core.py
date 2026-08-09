@@ -363,7 +363,7 @@ class SessionCore:
 
         stored_assistant_message = {
             "role": "assistant",
-            "content": choice["message"]["content"],
+            "content": assistant_message["content"],
             "tool_calls": None,
             "reasoning_content": None,
         }
