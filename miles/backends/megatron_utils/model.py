@@ -866,7 +866,7 @@ def save(
         enable_forward_pre_hook(model)
 
 
-def save_hf_model(args, rollout_id: int, model: Sequence[DDP]) -> None:
+def save_hf_model(args, rollout_id: int, model: Sequence[DDP], *, strict: bool = True) -> None:
     """Save Megatron model in HuggingFace format.
 
     For LoRA models this saves both:
@@ -881,6 +881,10 @@ def save_hf_model(args, rollout_id: int, model: Sequence[DDP]) -> None:
         args: Runtime arguments.
         model (Sequence[DDP]): Sequence of DDP-wrapped model chunks.
         rollout_id (int): Rollout ID for path formatting.
+        strict (bool): Passed to the bridge writer, which reuses the *source* checkpoint's
+            shard layout. With ``strict=True`` a shard is written only once every tensor
+            that layout assigns to it has been exported, so one absent tensor discards the
+            whole shard; ``strict=False`` writes the shard with the tensors that exist.
     """
     should_log = get_parallel_state().effective_dp_cp.rank == 0 and get_parallel_state().tp.rank == 0
 
@@ -901,7 +905,7 @@ def save_hf_model(args, rollout_id: int, model: Sequence[DDP]) -> None:
         with patch_megatron_model(model):
             # For LoRA models, merge_adapter_weights=True (default) merges
             # adapter weights into base weights for a standalone HF model.
-            bridge.save_hf_pretrained(model, path=path)
+            bridge.save_hf_pretrained(model, path=path, strict=strict)
 
         if should_log:
             logger.info(f"Successfully saved merged HuggingFace model to {path}")
