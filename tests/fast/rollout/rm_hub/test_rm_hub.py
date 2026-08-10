@@ -1,8 +1,8 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from miles.rollout.rm_hub import async_rm, batched_async_rm
+from miles.rollout.rm_hub import async_rm, batched_async_rm, default_async_rm
 from miles.utils.async_utils import run
 from miles.utils.types import Sample
 
@@ -11,6 +11,7 @@ from miles.utils.types import Sample
 def mock_args():
     args = MagicMock()
     args.custom_rm_path = None
+    args.multi_lora = False
     args.rm_type = None
     args.rm_url = None
     return args
@@ -95,6 +96,38 @@ class TestAsyncRm:
         with pytest.raises(NotImplementedError, match=match):
             run(async_rm(mock_args, sample))
 
+    def test_custom_rm_without_evaluation_parameter_remains_compatible(self, mock_args):
+        async def custom_rm(_args, _sample):
+            return 0.75
+
+        mock_args.custom_rm_path = "test.custom_rm"
+        sample = Sample(prompt="", response="response", label="label")
+        with patch("miles.rollout.rm_hub.load_function", return_value=custom_rm):
+            reward = run(async_rm(mock_args, sample, evaluation=True))
+
+        assert reward == 0.75
+
+    def test_custom_rm_receives_evaluation_when_supported(self, mock_args):
+        async def custom_rm(_args, _sample, evaluation=False):
+            return evaluation
+
+        mock_args.custom_rm_path = "test.custom_rm"
+        sample = Sample(prompt="", response="response", label="label")
+        with patch("miles.rollout.rm_hub.load_function", return_value=custom_rm):
+            reward = run(async_rm(mock_args, sample, evaluation=True))
+
+        assert reward is True
+
+    def test_default_async_rm_bypasses_custom_dispatch(self, mock_args):
+        mock_args.custom_rm_path = "test.custom_rm"
+        mock_args.rm_type = "math"
+        sample = Sample(prompt="", response=r"\boxed{42}", label="42")
+
+        with patch("miles.rollout.rm_hub.load_function", side_effect=AssertionError("custom RM called")):
+            reward = run(default_async_rm(mock_args, sample, evaluation=True))
+
+        assert reward == 1
+
 
 class TestBatchedAsyncRm:
     @pytest.mark.parametrize(
@@ -149,3 +182,14 @@ class TestBatchedAsyncRm:
         rewards = run(batched_async_rm(mock_args, samples))
         assert rewards[0] == 1
         assert rewards[1] == 1.0
+
+    def test_batched_custom_rm_without_evaluation_parameter_remains_compatible(self, mock_args):
+        async def custom_rm(_args, samples):
+            return [0.5] * len(samples)
+
+        mock_args.custom_rm_path = "test.custom_rm"
+        samples = [Sample(prompt="", response="response", label="label")]
+        with patch("miles.rollout.rm_hub.load_function", return_value=custom_rm):
+            rewards = run(batched_async_rm(mock_args, samples, evaluation=True))
+
+        assert rewards == [0.5]

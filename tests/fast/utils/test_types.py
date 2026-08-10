@@ -82,6 +82,12 @@ class TestStripLastOutputTokens:
         s.strip_last_output_tokens(1, tokenizer)
         assert len(s.loss_mask) == 2
 
+    def test_strip_truncates_opd_loss_mask(self, tokenizer):
+        s = _make_sample([1, 2], [3, 4, 5])
+        s.opd_loss_mask = [1.0, 0.0, 1.0]
+        s.strip_last_output_tokens(1, tokenizer)
+        assert s.opd_loss_mask == [1.0, 0.0]
+
     def test_strip_truncates_routed_experts(self, tokenizer):
         s = _make_sample([1, 2], [3, 4, 5], routed_experts=True)
         original_len = len(s.rollout_routed_experts)
@@ -105,3 +111,50 @@ class TestStripLastOutputTokens:
         original_tokens = list(s.tokens)
         s.strip_last_output_tokens(-1, tokenizer)
         assert s.tokens == original_tokens
+
+
+def test_validate_rejects_opd_loss_mask_length_mismatch():
+    sample = _make_sample([1, 2], [3, 4])
+    sample.opd_loss_mask = [1.0]
+
+    with pytest.raises(AssertionError, match="opd_loss_mask length"):
+        sample.validate()
+
+
+def test_reset_for_retry_clears_opd_signals():
+    sample = _make_sample([1, 2], [3, 4])
+    sample.teacher_log_probs = [-0.2, -0.3]
+    sample.opd_reverse_kl = [0.1, 0.2]
+    sample.opd_loss_mask = [1.0, 0.0]
+
+    sample.reset_for_retry()
+
+    assert sample.teacher_log_probs is None
+    assert sample.opd_reverse_kl is None
+    assert sample.opd_loss_mask is None
+
+
+def test_reset_for_retry_clears_only_transient_opd_metadata():
+    prompt = [{"role": "user", "content": "Keep this prompt"}]
+    tools = [{"type": "function", "function": {"name": "calculator"}}]
+    sample = _make_sample([1, 2], [3, 4])
+    sample.prompt = prompt
+    sample.metadata = {
+        "opd_messages": prompt,
+        "tools": tools,
+        "dataset_name": "math",
+        "opd_student_top_logprobs": [[[-0.1, 3]], [[-0.2, 4]]],
+        "opd_teacher_fallback": True,
+        "opd_teacher_fallback_reason": "TimeoutError",
+        "cross_vocab_token_overlap": 0.5,
+        "cross_vocab_aligned_chunks": 1,
+    }
+
+    sample.reset_for_retry()
+
+    assert sample.prompt == prompt
+    assert sample.metadata == {
+        "opd_messages": prompt,
+        "tools": tools,
+        "dataset_name": "math",
+    }

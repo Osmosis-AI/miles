@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import inspect
 import random
 
 import aiohttp
@@ -14,6 +15,20 @@ from .gpqa import compute_gpqa_reward
 from .math_dapo_utils import compute_score as compute_score_dapo
 from .math_utils import extract_answer as extract_boxed_answer
 from .math_utils import grade_answer_verl
+
+
+async def _call_custom_rm(rm_function, args, sample_or_samples, kwargs):
+    call_kwargs = kwargs
+    if "evaluation" in kwargs:
+        parameters = inspect.signature(rm_function).parameters.values()
+        accepts_evaluation = any(
+            parameter.name == "evaluation" or parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+        if not accepts_evaluation:
+            call_kwargs = dict(kwargs)
+            call_kwargs.pop("evaluation")
+    return await rm_function(args, sample_or_samples, **call_kwargs)
 
 
 async def remote_rm(args, sample: Sample):
@@ -41,12 +56,18 @@ def _resolve_reward_config(args, sample: Sample) -> tuple[str | None, str]:
 
 
 async def async_rm(args, sample: Sample, **kwargs):
-    custom_rm_path, rm_type = _resolve_reward_config(args, sample)
+    custom_rm_path, _ = _resolve_reward_config(args, sample)
 
     if custom_rm_path is not None:
         rm_function = load_function(custom_rm_path)
-        return await rm_function(args, sample, **kwargs)
+        return await _call_custom_rm(rm_function, args, sample, kwargs)
 
+    return await default_async_rm(args, sample, **kwargs)
+
+
+async def default_async_rm(args, sample: Sample, **_kwargs):
+    """Run the configured built-in or remote RM without custom-path dispatch."""
+    _, rm_type = _resolve_reward_config(args, sample)
     response = sample.response
     label = sample.label
     metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
@@ -103,7 +124,7 @@ async def batched_async_rm(
 
     if args.custom_rm_path is not None and not is_multi_lora_enabled(args):
         rm_function = load_function(args.custom_rm_path)
-        return await rm_function(args, samples, **kwargs)
+        return await _call_custom_rm(rm_function, args, samples, kwargs)
     tasks = [async_rm(args, sample, **kwargs) for sample in samples]
     rewards = await asyncio.gather(*tasks)
     return rewards

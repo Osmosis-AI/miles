@@ -93,6 +93,8 @@ async def generate_and_rm(
         sample = output.samples
         logger.debug(f"{log_prefix} generate_function returned")
 
+    reward_kwargs = {"evaluation": True} if evaluation else {}
+
     # TODO change to `if not args.group_rm: do reward model` for more clarity after the refactor below
     # for the rm that need the whole group, we will not do the rm here
     if args.group_rm:
@@ -107,14 +109,19 @@ async def generate_and_rm(
 
         # for multi agent system, the reward of some sample is calculated during generation.
         samples_need_reward = [sample for sample in samples if sample.reward is None]
-        await batched_async_rm(args, samples_need_reward, inplace_set_reward_field=True)
+        await batched_async_rm(
+            args,
+            samples_need_reward,
+            inplace_set_reward_field=True,
+            **reward_kwargs,
+        )
         return samples
     else:
         if sample.status == Sample.Status.ABORTED:
             return sample
         # for multi-turn environment, a reward could be assigned to the agent.
         if sample.reward is None:
-            sample.reward = await async_rm(args, sample)
+            sample.reward = await async_rm(args, sample, **reward_kwargs)
 
     logger.debug(f"{log_prefix} generate_and_rm complete")
     return sample
@@ -164,7 +171,13 @@ async def generate_and_rm_group(
         return group
 
     if args.group_rm:
-        await batched_async_rm(args, group, inplace_set_reward_field=True)
+        reward_kwargs = {"evaluation": True} if evaluation else {}
+        await batched_async_rm(
+            args,
+            group,
+            inplace_set_reward_field=True,
+            **reward_kwargs,
+        )
 
     return group
 

@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from miles.backends.training_utils import loss as loss_utils
+import miles.backends.training_utils.loss as loss_module
 from miles.backends.training_utils.loss_hub.opd import apply_opd_kl_to_advantages
 
 # This module intentionally has no explicit CI registration call: modules under
@@ -114,6 +115,37 @@ def test_fixed_opd_inputs_are_detached_in_persistent_rollout_data(monkeypatch):
     assert teacher_source.grad is None
 
 
+def test_same_tokenizer_mask_makes_fallback_positions_strict_noops():
+    args = _args(opd_kl_coef=2.0)
+    student = [torch.tensor([-0.4, -0.1])]
+    teacher = [torch.tensor([-0.2, -0.3])]
+    advantages = [torch.tensor([1.0, 2.0])]
+    rollout_data = {
+        "teacher_log_probs": teacher,
+        "opd_loss_masks": [[0.0, 1.0]],
+    }
+
+    apply_opd_kl_to_advantages(args, rollout_data, advantages, student)
+
+    assert torch.allclose(advantages[0], torch.tensor([1.0, 1.6]))
+    assert torch.allclose(rollout_data["opd_reverse_kl"][0], torch.tensor([0.0, 0.2]))
+    assert torch.equal(rollout_data["opd_loss_masks"][0], torch.tensor([0.0, 1.0]))
+
+
+def test_precomputed_reverse_kl_branch_remains_independent_of_same_tokenizer_mask():
+    args = _args(opd_kl_coef=0.5)
+    advantages = [torch.tensor([2.0, 2.0])]
+    rollout_data = {
+        "opd_reverse_kl": [[0.0, 1.0]],
+        "opd_loss_masks": [[0.0]],
+    }
+
+    apply_opd_kl_to_advantages(args, rollout_data, advantages, [torch.tensor([9.0, 9.0])])
+
+    assert torch.allclose(advantages[0], torch.tensor([2.0, 1.5]))
+    assert torch.allclose(rollout_data["opd_reverse_kl"][0], torch.tensor([0.0, 1.0]))
+
+
 def test_noop_when_student_log_probs_none():
     args = _args()
     advantages = [torch.tensor([1.0, 2.0])]
@@ -151,3 +183,70 @@ def test_raises_on_scalar_advantage_broadcast_trap():
 
     with pytest.raises(ValueError, match="OPD shape mismatch"):
         apply_opd_kl_to_advantages(args, rollout_data, advantages, student)
+
+
+def test_raises_on_opd_loss_mask_length_mismatch():
+    args = _args()
+    rollout_data = {
+        "teacher_log_probs": [torch.tensor([0.0]), torch.tensor([0.0])],
+        "opd_loss_masks": [[1.0]],
+    }
+    advantages = [torch.tensor([1.0]), torch.tensor([1.0])]
+    student = [torch.tensor([1.0]), torch.tensor([1.0])]
+
+    with pytest.raises(ValueError, match="opd_loss_masks"):
+        apply_opd_kl_to_advantages(args, rollout_data, advantages, student)
+
+
+def test_raises_on_opd_loss_mask_shape_mismatch():
+    args = _args()
+    rollout_data = {
+        "teacher_log_probs": [torch.tensor([0.0, 0.0])],
+        "opd_loss_masks": [[1.0]],
+    }
+
+    with pytest.raises(ValueError, match="opd_loss_mask"):
+        apply_opd_kl_to_advantages(
+            args,
+            rollout_data,
+            [torch.tensor([1.0, 1.0])],
+            [torch.tensor([1.0, 1.0])],
+        )
+
+
+def test_opd_is_applied_after_advantage_normalization(monkeypatch):
+    events = []
+
+    def fake_compute_advantages(**_kwargs):
+        return [torch.tensor([1.0])], [torch.tensor([0.0])]
+
+    def fake_normalize_advantages(_args, advantages, *_unused):
+        events.append("normalize")
+        return advantages
+
+    def fake_apply_opd_kl_to_advantages(**_kwargs):
+        events.append("opd")
+
+    monkeypatch.setattr(loss_module, "compute_advantages", fake_compute_advantages)
+    monkeypatch.setattr(loss_module, "normalize_advantages", fake_normalize_advantages)
+    monkeypatch.setattr(loss_module, "apply_opd_kl_to_advantages", fake_apply_opd_kl_to_advantages)
+
+    args = Namespace(
+        use_rollout_logprobs=False,
+        kl_coef=0.0,
+        use_opd=True,
+        normalize_advantages=True,
+    )
+    rollout_data = {
+        "log_probs": [torch.tensor([0.0])],
+        "ref_log_probs": None,
+        "rewards": [0.0],
+        "values": None,
+        "response_lengths": [1],
+        "loss_masks": [torch.tensor([1])],
+        "total_lengths": [1],
+    }
+
+    loss_module.compute_advantages_and_returns(args, rollout_data)
+
+    assert events == ["normalize", "opd"]

@@ -14,11 +14,13 @@ def apply_opd_kl_to_advantages(
     """Apply on-policy distillation KL penalty to advantages.
 
     Computes reverse KL (student_logp - teacher_logp) and adds weighted penalty
-    to advantages in-place. This is orthogonal to the base advantage estimator.
+    to advantages in-place. An optional per-token mask makes teacher fallback
+    positions strict no-ops. This is orthogonal to the base advantage estimator.
 
     Args:
         args: Configuration containing `use_opd` and `opd_kl_coef`.
-        rollout_data: Dict containing "teacher_log_probs".
+        rollout_data: Dict containing "teacher_log_probs" and optionally
+            "opd_loss_masks".
         advantages: List of advantage tensors to modify in-place.
         student_log_probs: List of old-student log-probability tensors. OPD
             treats these as fixed scoring inputs.
@@ -71,8 +73,15 @@ def apply_opd_kl_to_advantages(
     detached_teacher_log_probs = [t.detach() for t in teacher_log_probs]
     rollout_data["teacher_log_probs"] = detached_teacher_log_probs
     teacher_log_probs = [t.to(device=device) for t in detached_teacher_log_probs]
+    # Cross-tokenizer OPD masks positions whose token alignment failed.
+    opd_loss_masks = rollout_data.get("opd_loss_masks")
+    if opd_loss_masks is not None and len(opd_loss_masks) != len(advantages):
+        raise ValueError(
+            f"OPD length mismatch: advantages={len(advantages)}, opd_loss_masks={len(opd_loss_masks)}."
+        )
 
     reverse_kls = []
+    normalized_masks = []
     for i, adv in enumerate(advantages):
         if student_log_probs[i].shape != teacher_log_probs[i].shape:
             raise ValueError(
@@ -87,8 +96,19 @@ def apply_opd_kl_to_advantages(
             )
         old_student_log_prob = student_log_probs[i].detach()
         reverse_kl = old_student_log_prob - teacher_log_probs[i]
+        if opd_loss_masks is not None:
+            mask = torch.as_tensor(opd_loss_masks[i], dtype=torch.float32, device=adv.device)
+            if mask.shape != reverse_kl.shape:
+                raise ValueError(
+                    f"OPD shape mismatch at sample {i}: opd_loss_mask={tuple(mask.shape)}, "
+                    f"reverse_kl={tuple(reverse_kl.shape)}."
+                )
+            reverse_kl = reverse_kl * mask
+            normalized_masks.append(mask)
         advantages[i] = adv - args.opd_kl_coef * reverse_kl
         reverse_kls.append(reverse_kl)
 
     # Store reverse KL for logging.
     rollout_data["opd_reverse_kl"] = reverse_kls
+    if opd_loss_masks is not None:
+        rollout_data["opd_loss_masks"] = normalized_masks

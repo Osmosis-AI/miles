@@ -183,6 +183,17 @@ def add_sglang_arguments(parser):
 def validate_args(args):
     args.sglang_tp_size = args.rollout_num_gpus_per_engine
 
+    # Newer SGLang CLIs use descriptive flag names while ServerArgs and Miles
+    # still use the short field names internally. Normalize either CLI shape.
+    parallel_size_aliases = (
+        ("sglang_dp_size", "sglang_data_parallel_size"),
+        ("sglang_pp_size", "sglang_pipeline_parallel_size"),
+        ("sglang_ep_size", "sglang_expert_parallel_size"),
+    )
+    for miles_name, sglang_cli_name in parallel_size_aliases:
+        if not hasattr(args, miles_name):
+            setattr(args, miles_name, getattr(args, sglang_cli_name))
+
     if args.true_on_policy_mode:
         args.sglang_enable_deterministic_inference = True
 

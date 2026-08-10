@@ -372,6 +372,8 @@ async def generate_and_rm(
     if sink is not None:
         sink.attempt_end(sample)
 
+    reward_kwargs = {"evaluation": True} if evaluation else {}
+
     # for the rm that need the whole group, we will not do the rm here
     if args.group_rm:
         return sample
@@ -384,7 +386,7 @@ async def generate_and_rm(
 
         # for multi agent system, the reward of some sample is calculated during generation.
         samples_need_reward = [sample for sample in samples if sample.reward is None]
-        rewards = await batched_async_rm(args, samples_need_reward)
+        rewards = await batched_async_rm(args, samples_need_reward, **reward_kwargs)
         for sample, reward in zip(samples_need_reward, rewards, strict=False):
             sample.reward = reward
         return samples
@@ -393,7 +395,7 @@ async def generate_and_rm(
             return sample
         # for multi-turn environment, a reward could be assigned to the agent.
         if sample.reward is None:
-            sample.reward = await async_rm(args, sample)
+            sample.reward = await async_rm(args, sample, **reward_kwargs)
 
     return sample
 
@@ -426,7 +428,8 @@ async def generate_and_rm_group(
 
     # for the rm that need the whole group, we will do the rm here
     if not state.aborted and args.group_rm:
-        rewards = await batched_async_rm(args, group)
+        reward_kwargs = {"evaluation": True} if evaluation else {}
+        rewards = await batched_async_rm(args, group, **reward_kwargs)
         for sample, reward in zip(group, rewards, strict=False):
             sample.reward = reward
 
@@ -621,7 +624,12 @@ async def eval_rollout_single_dataset(
 
     global EVAL_PROMPT_DATASET
 
-    cache_key = dataset_cfg.cache_key + (args.hf_checkpoint, args.apply_chat_template, args.chat_template_path)
+    cache_key = dataset_cfg.cache_key + (
+        args.hf_checkpoint,
+        args.apply_chat_template,
+        args.chat_template_path,
+        getattr(args, "opd_prompt_messages_key", None),
+    )
     if cache_key not in EVAL_PROMPT_DATASET:
         tokenizer = load_tokenizer(
             args.hf_checkpoint, chat_template_path=args.chat_template_path, trust_remote_code=True
@@ -639,6 +647,7 @@ async def eval_rollout_single_dataset(
             tool_key=dataset_cfg.tool_key,
             apply_chat_template=args.apply_chat_template,
             apply_chat_template_kwargs=args.apply_chat_template_kwargs,
+            prompt_messages_key=getattr(args, "opd_prompt_messages_key", None),
         )
     dataset = EVAL_PROMPT_DATASET[cache_key]
 
