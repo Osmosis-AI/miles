@@ -52,18 +52,25 @@ def init_mlflow(args, *, primary: bool = True, **kwargs) -> None:
 
     import mlflow
 
-    tracking_uri = args.mlflow_tracking_uri or os.environ.get("MLFLOW_TRACKING_URI")
-    if tracking_uri:
-        mlflow.set_tracking_uri(tracking_uri)
-        logger.info("MLflow tracking URI: %s", tracking_uri)
+    try:
+        tracking_uri = args.mlflow_tracking_uri or os.environ.get("MLFLOW_TRACKING_URI")
+        if tracking_uri:
+            mlflow.set_tracking_uri(tracking_uri)
+            logger.info("MLflow tracking URI: %s", tracking_uri)
 
-    experiment_name = args.mlflow_experiment_name
-    mlflow.set_experiment(experiment_name)
+        experiment_name = args.mlflow_experiment_name
+        mlflow.set_experiment(experiment_name)
 
-    if primary:
-        _init_mlflow_primary(args, experiment_name)
-    else:
-        _init_mlflow_secondary(args)
+        if primary:
+            _init_mlflow_primary(args, experiment_name)
+        else:
+            _init_mlflow_secondary(args)
+    except Exception:
+        # An unreachable/broken tracking server must not block training (the
+        # staging server 404'd everything on 2026-08-10 and killed a restart
+        # at init). log_metrics no-ops when no run is active.
+        args.mlflow_run_id = None
+        logger.warning("MLflow init failed; continuing without MLflow tracking", exc_info=True)
 
 
 def _init_mlflow_primary(args, experiment_name: str) -> None:
