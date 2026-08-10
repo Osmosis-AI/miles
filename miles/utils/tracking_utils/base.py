@@ -176,7 +176,18 @@ class TrackingManager:
 
     def log(self, metrics: dict[str, Any], step: int | None = None, step_key: str | None = None) -> None:
         for backend in self._backends:
-            backend.log(metrics, step=step, step_key=step_key)
+            try:
+                backend.log(metrics, step=step, step_key=step_key)
+            except Exception:
+                # Tracking must never kill training: e.g. the MLflow staging
+                # server 404'd a deleted run mid-run and the raised
+                # MlflowException took down a multi-day job (2026-08-10).
+                logger.warning(
+                    "Tracking backend %s failed to log (step=%s); continuing",
+                    type(backend).__name__,
+                    step,
+                    exc_info=True,
+                )
 
     def define_step_key_metric_group(self, prefix: str, step_key: str) -> None:
         for backend in self._backends:

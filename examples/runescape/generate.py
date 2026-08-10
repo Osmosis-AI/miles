@@ -164,7 +164,12 @@ def log_artifacts_to_mlflow(samples: list[Sample], rollout_id: int, args) -> Non
         if run_id is None:
             logger.warning("no MLflow run id available; skipping artifact logging")
             return
-        mlflow.start_run(run_id=run_id)
+        try:
+            mlflow.start_run(run_id=run_id)
+        except Exception as e:
+            # e.g. the run was deleted server-side (404); never kill training.
+            logger.warning(f"could not attach to MLflow run {run_id}: {e}")
+            return
 
     rewards = [float(s.metadata.get("reward", 0.0)) for s in samples]
     video_indices = set(_video_sample_indices(rewards))
