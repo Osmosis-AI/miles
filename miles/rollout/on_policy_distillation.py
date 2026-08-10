@@ -1,12 +1,23 @@
+import json
 import math
 from argparse import Namespace
 from collections.abc import Iterable
 from typing import Any
 
 import aiohttp
+import numpy as np
 import torch
 
 from miles.utils.types import Sample
+
+try:
+    # Scoring responses carry O(response_len * top_k) logprob entries; stdlib json
+    # decode dominates the reward path at that scale (~5-10x slower than orjson).
+    import orjson
+
+    _json_loads = orjson.loads
+except ImportError:  # orjson is an sglang dependency, not a miles one
+    _json_loads = json.loads
 
 TopLogprobs = list[list[Any]]
 LogprobMaps = list[dict[int, float]]
@@ -144,7 +155,9 @@ async def _post_json(url: str, payload: dict[str, Any], timeout_secs: int | floa
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(url, json=payload) as resp:
             resp.raise_for_status()
-            return await resp.json()
+            # Decode from raw bytes: skips aiohttp's charset detection + str copy,
+            # and lets orjson (when present) parse the large logprob payloads.
+            return _json_loads(await resp.read())
 
 
 def _top_entry_token_id(entry: list[Any]) -> int:
@@ -278,6 +291,82 @@ def _reward_weights(
     return [v / denom for v in exp_vals]
 
 
+def _fast_topk_reverse_kl(
+    args: Namespace,
+    sample: Sample,
+    reward_payload: dict[str, Any],
+) -> torch.Tensor | None:
+    """Vectorized only-student path over position-aligned arrays.
+
+    With per-position teacher scoring, ``input_token_ids_logprobs[i]`` carries
+    the logprobs of exactly the student's top-k ids at position ``i``, in
+    request order -- so student and teacher collapse to two aligned ``[N, k]``
+    arrays and the weighted reverse-KL needs no per-entry dict building
+    (which dominates the reward path at trajectory scale: tens of millions of
+    Python-level map inserts per batch).
+
+    Returns ``None`` whenever the inputs don't match that shape (flat-union
+    responses, ragged widths, id mismatches, malformed entries); the caller
+    then falls back to the generic map-based path, so this is a pure
+    optimization with identical semantics.
+    """
+    response_length = sample.response_length
+    student_top = _student_top_logprobs(sample, response_length)
+    teacher_rows = _trim_input_field(
+        reward_payload["teacher"]["meta_info"], "input_token_ids_logprobs", response_length
+    )
+    if len(teacher_rows) != response_length:
+        return None
+
+    # Blanked positions (e.g. loss-masked observation tokens) carry no ids on
+    # either side and contribute zero KL.
+    nonempty = [i for i, row in enumerate(student_top) if row]
+    if not nonempty:
+        return torch.zeros(response_length, dtype=torch.float32)
+
+    width = len(student_top[nonempty[0]])
+    s_pairs, t_pairs = [], []
+    for i in nonempty:
+        s_row = student_top[i]
+        t_row = teacher_rows[i] or []
+        if len(s_row) != width or len(t_row) != width:
+            return None
+        # Entries are [logprob, token_id] or [logprob, token_id, text]; keep
+        # the numeric pair so the ndarray conversion stays C-speed.
+        s_pairs.append([entry[:2] for entry in s_row])
+        t_pairs.append([entry[:2] for entry in t_row])
+
+    try:
+        s = np.asarray(s_pairs, dtype=np.float64)
+        t = np.asarray(t_pairs, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if s.ndim != 3 or s.shape != t.shape or s.shape[2] != 2:
+        return None
+    # Alignment contract: same ids, same order, at every position. Token ids
+    # are exact in float64 (< 2^53).
+    if not np.array_equal(s[:, :, 1], t[:, :, 1]):
+        return None
+
+    s_logps, t_logps = s[:, :, 0], t[:, :, 0]
+    weight_mode = _get_reward_weight_mode(args)
+    if weight_mode == "student_p":
+        ref = s_logps
+    elif weight_mode == "teacher_p":
+        ref = t_logps
+    else:
+        ref = np.zeros_like(s_logps)
+    # Mirrors _reward_weights(..., normalize=True): softmax over the k ids.
+    shifted = np.exp(ref - ref.max(axis=1, keepdims=True))
+    denom = shifted.sum(axis=1, keepdims=True)
+    weights = np.divide(shifted, denom, out=np.zeros_like(shifted), where=denom != 0)
+    kl_nonempty = (weights * (s_logps - t_logps)).sum(axis=1)
+
+    reverse_kls = np.zeros(response_length, dtype=np.float32)
+    reverse_kls[nonempty] = kl_nonempty.astype(np.float32)
+    return torch.from_numpy(reverse_kls)
+
+
 def _compute_topk_reverse_kl(
     args: Namespace,
     sample: Sample,
@@ -289,6 +378,11 @@ def _compute_topk_reverse_kl(
 
     strategy = _get_top_k_strategy(args)
     weight_mode = _get_reward_weight_mode(args)
+
+    if strategy == "only-student" and "student_on_teacher" not in reward_payload:
+        fast = _fast_topk_reverse_kl(args, sample, reward_payload)
+        if fast is not None:
+            return fast
 
     student_top_maps = (
         [_top_entries_to_map(entries) for entries in _student_top_logprobs(sample, response_length)]
