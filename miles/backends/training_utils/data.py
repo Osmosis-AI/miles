@@ -183,6 +183,17 @@ def get_batch(
             tokens = [
                 F.pad(t, (0, max_seqlen - t.size(0)), value=pad_token_id)[start : start + local_len] for t in tokens
             ]
+        elif cp_size > 1:
+            # The bridge Qwen3-VL-family models CP-split their input INTERNALLY
+            # (megatron-bridge modelling_qwen3_vl/model.py: _split_if_full_sequence
+            # -> split_data_cp_rank). Pre-slicing here double-splits the sequence
+            # (observed logits rows = max_seq_len/cp^2 across CP=2/4/8). Feed the
+            # FULL padded sequence and let the model perform the single zigzag
+            # split; downstream offset math already assumes the zigzag CP-local
+            # layout the model emits.
+            # TODO: gate on bridge-vs-mcore model if a non-bridge bshd+CP path
+            # ever exists (mcore GDN expects pre-sliced input).
+            tokens = [F.pad(t, (0, max_seqlen - t.size(0)), value=pad_token_id) for t in tokens]
         else:
             tokens = [slice_with_cp(t, pad_token_id, qkv_format, max_seqlen) for t in tokens]
         sample_token_lengths = [t.size(0) for t in tokens]
