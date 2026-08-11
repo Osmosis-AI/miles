@@ -133,9 +133,16 @@ class BaseReplayManager:
                 return result
 
             elif stage == "replay_forward":
+                # Aborted/empty samples carry no recorded routing (e.g. a wave
+                # whose model calls all failed): fall back to live routing
+                # rather than crashing the training step on an empty buffer.
+                if not replay.top_indices_list:
+                    return old_topk_fn(scores, topk, *args, **kwargs)
                 return _get_replay_result(replay.pop_forward(), scores, topk, *args, **kwargs)
 
             elif stage == "replay_backward":
+                if not replay.top_indices_list:
+                    return old_topk_fn(scores, topk, *args, **kwargs)
                 return _get_replay_result(replay.pop_backward(), scores, topk, *args, **kwargs)
 
             else:
