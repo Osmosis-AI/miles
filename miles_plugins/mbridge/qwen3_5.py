@@ -66,6 +66,25 @@ class Qwen3_5Bridge(Qwen2MoEBridge):
             "self_attn.q_proj.weight",
             "self_attn.v_proj.weight",
         ]
+    } | {
+        # miles_plugins/models/qwen3_5.py mounts the GDN params DIRECTLY on the
+        # attention module (self_attention.dt_bias, not
+        # self_attention.linear_attn.dt_bias), so the raw converter's mcore
+        # names arrive flat. Map them to the HF linear_attn.* tensors.
+        f"self_attention.{weight_name}": [
+            "model.language_model.layers.{layer_number}.linear_attn." + weight_name
+        ]
+        for weight_name in [
+            "A_log",
+            "conv1d.weight",
+            "dt_bias",
+            "in_proj_a.weight",
+            "in_proj_b.weight",
+            "in_proj_qkv.weight",
+            "in_proj_z.weight",
+            "norm.weight",
+            "out_proj.weight",
+        ]
     }
 
     _MLP_MAPPING = {
