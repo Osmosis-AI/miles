@@ -33,12 +33,12 @@ import argparse
 import importlib.util
 from pathlib import Path
 
-MARKER = "MILES_FLA_PIN_AUTOTUNE_V3"
+MARKER = "MILES_FLA_PIN_AUTOTUNE_V4"
 OLD_MARKERS = ["# === MILES_FLA_PIN_AUTOTUNE (", "# === MILES_FLA_PIN_AUTOTUNE_V"]
 
 PATCH = '''
 
-# === MILES_FLA_PIN_AUTOTUNE_V3 (appended by miles tools/pin_fla_autotune.py) ===
+# === MILES_FLA_PIN_AUTOTUNE_V4 (appended by miles tools/pin_fla_autotune.py) ===
 # Deterministic single-launch autotune when FLA_PIN_AUTOTUNE=1: benchmark
 # timing loops re-execute kernels a rank-dependent number of times, which
 # desyncs CP ranks that interleave collectives inside the GDN layer. Here
@@ -47,6 +47,13 @@ PATCH = '''
 # are pre-sorted strongest-first (descending warps*stages): at the long-T
 # shapes these probes run, weak configs are 20-50x slower, and evaluation
 # order is the pick order.
+#
+# Conv kernels (causal_conv1d_*) get NO probe launches at all: they run at
+# full sequence length per rank (applied after the CP gather), where at
+# ~200k tokens a pathological config runs quasi-infinitely under
+# cuda.synchronize — even a single-launch sweep is unbounded (observed:
+# 25+ min silent inside causal_conv1d_bwd_kernel autotune). Keeping exactly
+# one median-strength config makes triton skip benching entirely.
 if os.environ.get("FLA_PIN_AUTOTUNE", "0") == "1":
     _pin_orig_autotune = triton.autotune
 
@@ -73,7 +80,15 @@ if os.environ.get("FLA_PIN_AUTOTUNE", "0") == "1":
         kwargs.pop("cache_results", None)
         if configs is not None:
             configs = sorted(configs, key=_pin_config_rank)
-        return _pin_orig_autotune(configs=configs, key=key, **kwargs)
+
+        def _pin_decorator(fn):
+            cfgs = configs
+            name = getattr(fn, "__name__", None) or getattr(getattr(fn, "fn", None), "__name__", "")
+            if cfgs and "conv" in name:
+                cfgs = [cfgs[len(cfgs) // 2]]
+            return _pin_orig_autotune(configs=cfgs, key=key, **kwargs)(fn)
+
+        return _pin_decorator
 
     triton.autotune = _pin_autotune
 '''
