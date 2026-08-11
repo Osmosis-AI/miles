@@ -50,14 +50,28 @@ def get_responses(
         logits = logits.squeeze(0)
     else:
         assert max_seq_lens is not None
-        if get_parallel_state().cp.size > 1:
-            import logging as _logging
+        _ps = get_parallel_state()
+        if _ps.cp.size > 1:
+            # Under bshd + CP>1 the bridge model's LM head returns logits with
+            # the sequence still sequence-parallel-sharded across TP (observed:
+            # [1, s_cp_local/tp, V/tp] for a [1, s_cp_local] input; at CP=1 the
+            # head's SP gather runs and rows arrive full). The vocab-parallel
+            # softmax in calculate_log_probs_and_entropy requires every TP rank
+            # to hold identical sequence rows, so gather the SP shard back.
+            # Megatron's region op is autograd-correct (reduce-scatter bwd).
+            expected_local_rows = logits.size(0) * (max_seq_lens[0] // _ps.cp.size)
+            actual_rows = logits.size(0) * logits.size(1)
+            if actual_rows * _ps.tp.size == expected_local_rows:
+                from megatron.core import tensor_parallel as _mtp
 
-            _logging.getLogger(__name__).warning(
-                f"[cp-debug] raw logits shape={tuple(logits.shape)} "
-                f"n_samples={len(unconcat_tokens)} total_lengths={total_lengths} "
-                f"max_seq_lens={max_seq_lens}"
-            )
+                logits = logits.transpose(0, 1).contiguous()  # [s_shard, b, V]
+                logits = _mtp.gather_from_sequence_parallel_region(logits, tensor_parallel_output_grad=False)
+                logits = logits.transpose(0, 1)  # [b, s_local, V]
+            else:
+                assert actual_rows == expected_local_rows, (
+                    f"bshd+CP logits rows {actual_rows} match neither full CP-local "
+                    f"({expected_local_rows}) nor SP-sharded ({expected_local_rows // _ps.tp.size}) layout"
+                )
         logits = logits.view(-1, logits.size(-1))
 
     if logits.size(-1) > 1 and args.rollout_temperature > 0 and args.rollout_temperature != 1.0:
