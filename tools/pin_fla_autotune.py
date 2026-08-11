@@ -1,4 +1,4 @@
-"""Pin fla's Triton autotune grids to a single deterministic config.
+"""Make fla's Triton autotune deterministic and desync-free under CP.
 
 Appends an env-gated monkeypatch to the installed fla package's utils.py.
 fla kernels decorate with ``@triton.autotune(configs=[...], ...)`` at module
@@ -10,45 +10,62 @@ Why: under context parallelism, mcore GDN interleaves CP collectives inside
 the layer while Triton autotune's do_bench re-executes kernels a
 rank-dependent number of times. Ranks desynchronize and park in NCCL forever
 (observed: all ranks 100% util at ~130 W flat, caches frozen, no progress).
-With a single config Triton's Autotuner never benchmarks, so every rank
-takes the identical path.
+
+Approach: keep every config (autotune benching doubles as a *feasibility*
+filter — pinning to one fixed config OOMs at kernel launch when that config
+needs more local memory than the colocated run has free), but replace the
+timing benchmark with a single-launch feasibility sweep:
+
+- each rank launches each config exactly once (uniform launch counts across
+  ranks -> no collective desync),
+- a config that fails to launch scores infinity (feasibility preserved),
+- the reported "time" is the evaluation index, so every rank
+  deterministically picks the first feasible config.
 
 The patch only activates when FLA_PIN_AUTOTUNE=1 is set in the environment;
-otherwise fla behaves stock. Config choice is the most conservative one
-(smallest block-size product, then fewest warps/stages), identical on every
-rank because fla's config lists are static module-level literals.
+otherwise fla behaves stock.
 
-Idempotent: re-running skips if the marker is already present.
+Idempotent: re-running skips if the current marker is present; an older
+patch block (previous marker version) is stripped and replaced.
 """
 
 import argparse
 import importlib.util
 from pathlib import Path
 
-MARKER = "MILES_FLA_PIN_AUTOTUNE"
+MARKER = "MILES_FLA_PIN_AUTOTUNE_V2"
+OLD_MARKERS = ["# === MILES_FLA_PIN_AUTOTUNE (", "# === MILES_FLA_PIN_AUTOTUNE_V"]
 
 PATCH = '''
 
-# === MILES_FLA_PIN_AUTOTUNE (appended by miles tools/pin_fla_autotune.py) ===
-# Pin every @triton.autotune to one deterministic config when
-# FLA_PIN_AUTOTUNE=1: autotune do_bench re-executes kernels a rank-dependent
-# number of times, which desyncs CP ranks that interleave collectives inside
-# the GDN layer. One config -> Triton skips benchmarking entirely.
+# === MILES_FLA_PIN_AUTOTUNE_V2 (appended by miles tools/pin_fla_autotune.py) ===
+# Deterministic single-launch autotune when FLA_PIN_AUTOTUNE=1: benchmark
+# timing loops re-execute kernels a rank-dependent number of times, which
+# desyncs CP ranks that interleave collectives inside the GDN layer. Here
+# each config is launched exactly once (feasibility probe); "time" is the
+# evaluation index, so every rank picks the first feasible config.
 if os.environ.get("FLA_PIN_AUTOTUNE", "0") == "1":
     _pin_orig_autotune = triton.autotune
 
-    def _pin_config_cost(cfg):
-        block = 1
-        for _v in (getattr(cfg, "kwargs", None) or {}).values():
-            if isinstance(_v, int):
-                block *= max(_v, 1)
-        return (block, getattr(cfg, "num_warps", 4) or 4, getattr(cfg, "num_stages", 1) or 1)
+    def _pin_det_bench(kernel_call, quantiles=None, **_kw):
+        _pin_det_bench._idx += 1
+        try:
+            kernel_call()
+            torch.cuda.synchronize()
+            val = float(_pin_det_bench._idx)
+        except Exception:
+            # Launch-infeasible config (e.g. CUDA OOM on local-memory-heavy
+            # variants); triton's own catch-list misses launch RuntimeErrors.
+            val = float("inf")
+        return (val, val, val) if quantiles is not None else val
+
+    _pin_det_bench._idx = 0
 
     def _pin_autotune(configs=None, key=None, **kwargs):
-        cfg_list = list(configs) if configs is not None else []
-        if len(cfg_list) > 1:
-            cfg_list = [min(cfg_list, key=_pin_config_cost)]
-        return _pin_orig_autotune(configs=cfg_list, key=key, **kwargs)
+        kwargs["do_bench"] = _pin_det_bench
+        # Persisted "timings" from the index trick would be bogus across runs.
+        kwargs.pop("cache_results", None)
+        return _pin_orig_autotune(configs=configs, key=key, **kwargs)
 
     triton.autotune = _pin_autotune
 '''
@@ -75,6 +92,13 @@ def main() -> None:
     if MARKER in source:
         print(f"already patched: {utils_py}")
         return
+
+    for old in OLD_MARKERS:
+        idx = source.find(old)
+        if idx != -1:
+            source = source[:idx].rstrip() + "\n"
+            print("stripped previous patch block")
+            break
 
     utils_py.write_text(source + PATCH)
     print(f"patched: {utils_py}")
