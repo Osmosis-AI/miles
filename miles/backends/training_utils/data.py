@@ -308,7 +308,12 @@ def get_batch(
         if allgather_cp:
             loss_masks.append(loss_mask)
             continue
-        loss_mask = slice_with_cp(loss_mask, 0, qkv_format, max_seqlen)
+        if qkv_format == "bshd" and cp_size > 1:
+            # Mirror the tokens path: the bridge VL models CP-split internally,
+            # so the model-input loss mask must stay full-length too.
+            loss_mask = F.pad(loss_mask, (0, max_seqlen - loss_mask.size(0)), value=0)
+        else:
+            loss_mask = slice_with_cp(loss_mask, 0, qkv_format, max_seqlen)
         loss_masks.append(loss_mask)
 
     if qkv_format == "bshd":
