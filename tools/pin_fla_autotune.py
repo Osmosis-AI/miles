@@ -33,19 +33,25 @@ import argparse
 import importlib.util
 from pathlib import Path
 
-MARKER = "MILES_FLA_PIN_AUTOTUNE_V2"
+MARKER = "MILES_FLA_PIN_AUTOTUNE_V3"
 OLD_MARKERS = ["# === MILES_FLA_PIN_AUTOTUNE (", "# === MILES_FLA_PIN_AUTOTUNE_V"]
 
 PATCH = '''
 
-# === MILES_FLA_PIN_AUTOTUNE_V2 (appended by miles tools/pin_fla_autotune.py) ===
+# === MILES_FLA_PIN_AUTOTUNE_V3 (appended by miles tools/pin_fla_autotune.py) ===
 # Deterministic single-launch autotune when FLA_PIN_AUTOTUNE=1: benchmark
 # timing loops re-execute kernels a rank-dependent number of times, which
 # desyncs CP ranks that interleave collectives inside the GDN layer. Here
 # each config is launched exactly once (feasibility probe); "time" is the
-# evaluation index, so every rank picks the first feasible config.
+# evaluation index, so every rank picks the first feasible config. Configs
+# are pre-sorted strongest-first (descending warps*stages): at the long-T
+# shapes these probes run, weak configs are 20-50x slower, and evaluation
+# order is the pick order.
 if os.environ.get("FLA_PIN_AUTOTUNE", "0") == "1":
     _pin_orig_autotune = triton.autotune
+
+    def _pin_config_rank(cfg):
+        return -((getattr(cfg, "num_warps", 4) or 4) * (getattr(cfg, "num_stages", 1) or 1))
 
     def _pin_det_bench(kernel_call, quantiles=None, **_kw):
         _pin_det_bench._idx += 1
@@ -65,6 +71,8 @@ if os.environ.get("FLA_PIN_AUTOTUNE", "0") == "1":
         kwargs["do_bench"] = _pin_det_bench
         # Persisted "timings" from the index trick would be bogus across runs.
         kwargs.pop("cache_results", None)
+        if configs is not None:
+            configs = sorted(configs, key=_pin_config_rank)
         return _pin_orig_autotune(configs=configs, key=key, **kwargs)
 
     triton.autotune = _pin_autotune
