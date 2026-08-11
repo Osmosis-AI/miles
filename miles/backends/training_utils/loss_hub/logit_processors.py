@@ -50,6 +50,14 @@ def get_responses(
         logits = logits.squeeze(0)
     else:
         assert max_seq_lens is not None
+        if get_parallel_state().cp.size > 1:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                f"[cp-debug] raw logits shape={tuple(logits.shape)} "
+                f"n_samples={len(unconcat_tokens)} total_lengths={total_lengths} "
+                f"max_seq_lens={max_seq_lens}"
+            )
         logits = logits.view(-1, logits.size(-1))
 
     if logits.size(-1) > 1 and args.rollout_temperature > 0 and args.rollout_temperature != 1.0:
