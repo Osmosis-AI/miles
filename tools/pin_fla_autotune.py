@@ -33,12 +33,12 @@ import argparse
 import importlib.util
 from pathlib import Path
 
-MARKER = "MILES_FLA_PIN_AUTOTUNE_V4"
+MARKER = "MILES_FLA_PIN_AUTOTUNE_V5"
 OLD_MARKERS = ["# === MILES_FLA_PIN_AUTOTUNE (", "# === MILES_FLA_PIN_AUTOTUNE_V"]
 
 PATCH = '''
 
-# === MILES_FLA_PIN_AUTOTUNE_V4 (appended by miles tools/pin_fla_autotune.py) ===
+# === MILES_FLA_PIN_AUTOTUNE_V5 (appended by miles tools/pin_fla_autotune.py) ===
 # Deterministic single-launch autotune when FLA_PIN_AUTOTUNE=1: benchmark
 # timing loops re-execute kernels a rank-dependent number of times, which
 # desyncs CP ranks that interleave collectives inside the GDN layer. Here
@@ -85,7 +85,10 @@ if os.environ.get("FLA_PIN_AUTOTUNE", "0") == "1":
             cfgs = configs
             name = getattr(fn, "__name__", None) or getattr(getattr(fn, "fn", None), "__name__", "")
             if cfgs and "conv" in name:
-                cfgs = [cfgs[len(cfgs) // 2]]
+                # Strongest config (list is pre-sorted descending warps*stages):
+                # weak/mid configs measured 20-50x slower at long T — at 200k the
+                # median pick ran quasi-infinitely (observed: 50 min frozen).
+                cfgs = [cfgs[0]]
             return _pin_orig_autotune(configs=cfgs, key=key, **kwargs)(fn)
 
         return _pin_decorator
