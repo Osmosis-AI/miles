@@ -67,11 +67,13 @@ def collect_benchmark_metrics(samples: list[Sample]) -> dict:
         "benchmark/peak_xp_rate_max": max(peaks),
         "benchmark/peak_xp_rate_mean": statistics.mean(peaks),
         "benchmark/nonzero_frac": sum(1 for r in rewards if r > 0) / len(rewards),
-        "reward/mean_xp_rate_mean": statistics.mean(rewards),
-        "reward/mean_xp_rate_max": max(rewards),
+        # Named for the reward statistic actually in use (REWARD_STAT=peak):
+        # reward.txt carries peakXpRate; these are wave aggregations of it.
+        "reward/peak_xp_rate_mean": statistics.mean(rewards),
+        "reward/peak_xp_rate_max": max(rewards),
     }
     if len(rewards) >= 2:
-        metrics["reward/mean_xp_rate_std"] = statistics.stdev(rewards)
+        metrics["reward/peak_xp_rate_std"] = statistics.stdev(rewards)
     return metrics
 
 
