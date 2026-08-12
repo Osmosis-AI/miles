@@ -4,6 +4,8 @@ import dataclasses
 import gc
 import logging
 import math
+import os
+import time
 from argparse import Namespace
 from collections.abc import Callable, Sequence
 from contextlib import nullcontext
@@ -122,6 +124,32 @@ def _is_muon_optimizer(optimizer: str | None) -> bool:
     return optimizer is not None and "muon" in optimizer.lower()
 
 
+def _register_layer_heartbeat(model_chunks: Sequence[torch.nn.Module]) -> None:
+    """Env-gated (MILES_LAYER_HEARTBEAT=<seconds>) rank-0 progress prints from
+    forward/backward pre-hooks on each TransformerLayer. Long-context steps can
+    run silently for an hour inside a single forward or backward; the throttled
+    heartbeat shows which layer is executing so a park is distinguishable from
+    slow compute without ptrace."""
+    interval = float(os.environ.get("MILES_LAYER_HEARTBEAT", "0") or 0)
+    if interval <= 0 or torch.distributed.get_rank() != 0:
+        return
+    layers = [m for chunk in model_chunks for m in chunk.modules() if type(m).__name__ == "TransformerLayer"]
+    state = {"last": 0.0}
+
+    def make_hook(phase: str, idx: int):
+        def hook(module, *_unused):
+            now = time.monotonic()
+            if now - state["last"] >= interval:
+                state["last"] = now
+                logger.info(f"layer heartbeat: {phase} layer {idx + 1}/{len(layers)}")
+
+        return hook
+
+    for i, layer in enumerate(layers):
+        layer.register_forward_pre_hook(make_hook("forward", i))
+        layer.register_full_backward_pre_hook(make_hook("backward", i))
+
+
 def setup_model_and_optimizer(
     args: Namespace,
     role: str = "actor",
@@ -160,6 +188,8 @@ def setup_model_and_optimizer(
 
             provider_func = wrap_model_provider_with_inkling_lora(provider_func, args)
         model = get_model(provider_func, ModelType.encoder_or_decoder)
+
+    _register_layer_heartbeat(model)
 
     if args.debug_disable_optimizer:
         if is_first_replica_megatron_main_rank():

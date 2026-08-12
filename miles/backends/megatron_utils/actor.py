@@ -1,8 +1,10 @@
 import atexit
+import faulthandler
 import logging
 import os
 import random
 import shutil
+import signal
 from argparse import Namespace
 from contextlib import ExitStack, nullcontext
 from typing import TYPE_CHECKING
@@ -98,6 +100,10 @@ class MegatronTrainRayActor(TrainRayActor):
         indep_dp_info: IndepDPInfo,
     ) -> int | None:
         monkey_patch_torch_dist()
+
+        # ptrace (py-spy/gdb) is unavailable in these pods; `kill -USR1 <pid>`
+        # dumps all Python thread stacks to stderr for hang diagnosis.
+        faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
 
         super().init(args, role, with_ref, with_opd_teacher=with_opd_teacher)
 
