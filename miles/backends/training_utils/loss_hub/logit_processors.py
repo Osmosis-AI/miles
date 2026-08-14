@@ -16,8 +16,8 @@ def get_responses(
     total_lengths: list[int],
     response_lengths: list[int],
     max_seq_lens: list[int] | None = None,
-) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
-    """Yield response-aligned `(logits_chunk, tokens_chunk)` pairs per sample.
+) -> Iterator[list[tuple[torch.Tensor, torch.Tensor]]]:
+    """Yield response-aligned `(logits_chunk, tokens_chunk)` pieces per sample.
 
     After squeezing batch dimension and applying temperature scaling, this
     function extracts the logits and tokens corresponding to response segments
@@ -34,9 +34,13 @@ def get_responses(
         response_lengths: Response segment lengths per sample.
 
     Yields:
-        Tuple of `(logits_chunk, tokens_chunk)` where `logits_chunk` is shape
-        `[R, V]` (policy) or `[R, 1]` (value) and `tokens_chunk` is shape `[R]`
-        (1D int64), both aligned to response tokens for one sample.
+        Per sample, a list of `(logits_chunk, tokens_chunk)` pieces in response
+        order, where `logits_chunk` is shape `[R_i, V]` (policy) or `[R_i, 1]`
+        (value) and `tokens_chunk` is shape `[R_i]` (1D int64). Without CP the
+        list has one piece; with zigzag CP it has one piece per local chunk.
+        Pieces are views into `logits` — never concatenated here, because a
+        cat materializes an O(response x vocab) copy that OOMs on long
+        zero-truncation samples (20+ GiB fp32 at ~72k tokens under CP2).
     """
     qkv_format = args.qkv_format
 
@@ -79,6 +83,7 @@ def get_responses(
                 start = end - response_length
                 logits_chunk = logits[start - 1 : end - 1]
             tokens_chunk = tokens[-response_length:]
+            pieces = [(logits_chunk, tokens_chunk)]
         elif args.allgather_cp:
             # DSA: global concat then contiguous CP split. Each rank owns logits for
             # global positions [chunk_start, chunk_end).
@@ -102,6 +107,7 @@ def get_responses(
                 logits_chunk = logits[s - chunk_start : e - chunk_start]
                 tokens_chunk = tokens[(s + 1) - seq_start : (e + 1) - seq_start]
             assert logits_chunk.size(0) == tokens_chunk.size(0), f"{logits_chunk.size(0)} vs {tokens_chunk.size(0)}"
+            pieces = [(logits_chunk, tokens_chunk)]
         else:
             # TODO: this is super ugly... do better abstraction.
             chunk_size, chunks_offset, logits_offset, tokens_offset = get_logits_and_tokens_offset_with_cp(
@@ -120,12 +126,11 @@ def get_responses(
             assert logits_0.size(0) == tokens_0.size(0), f"{logits_0.size(0)} vs {tokens_0.size(0)}"
             assert logits_1.size(0) == tokens_1.size(0), f"{logits_1.size(0)} vs {tokens_1.size(0)}"
 
-            logits_chunk = torch.cat([logits_0, logits_1], dim=0)
-            tokens_chunk = torch.cat([tokens_0, tokens_1], dim=0)
+            pieces = [(logits_0, tokens_0), (logits_1, tokens_1)]
 
         seq_start += total_length
 
-        yield logits_chunk, tokens_chunk
+        yield pieces
 
 
 def get_log_probs_and_entropy(
@@ -167,7 +172,7 @@ def get_log_probs_and_entropy(
     parallel_state = get_parallel_state()
     log_probs_list = []
     entropy_list = []
-    for logits_chunk, tokens_chunk in get_responses(
+    for pieces in get_responses(
         logits,
         args=args,
         unconcat_tokens=unconcat_tokens,
@@ -175,20 +180,30 @@ def get_log_probs_and_entropy(
         response_lengths=response_lengths,
         max_seq_lens=max_seq_lens,
     ):
-        log_prob, entropy = calculate_log_probs_and_entropy(
-            logits_chunk,
-            tokens_chunk,
-            parallel_state.tp.group,
-            with_entropy=with_entropy,
-            entropy_requires_grad=entropy_requires_grad,
-            chunk_size=args.log_probs_chunk_size,
-            true_on_policy=args.true_on_policy_mode,
-            vocab_size=getattr(args, "vocab_size", None),
-        )
+        piece_log_probs = []
+        piece_entropies = []
+        for logits_chunk, tokens_chunk in pieces:
+            # A zigzag piece is empty when the response lies entirely in the
+            # sample's other local chunk; a sample always has >=1 nonempty piece.
+            if tokens_chunk.size(0) == 0:
+                continue
+            log_prob, entropy = calculate_log_probs_and_entropy(
+                logits_chunk,
+                tokens_chunk,
+                parallel_state.tp.group,
+                with_entropy=with_entropy,
+                entropy_requires_grad=entropy_requires_grad,
+                chunk_size=args.log_probs_chunk_size,
+                true_on_policy=args.true_on_policy_mode,
+                vocab_size=getattr(args, "vocab_size", None),
+            )
+            piece_log_probs.append(log_prob.squeeze(-1))
+            if with_entropy:
+                piece_entropies.append(entropy)
 
-        log_probs_list.append(log_prob.squeeze(-1))
+        log_probs_list.append(piece_log_probs[0] if len(piece_log_probs) == 1 else torch.cat(piece_log_probs, dim=0))
         if with_entropy:
-            entropy_list.append(entropy)
+            entropy_list.append(piece_entropies[0] if len(piece_entropies) == 1 else torch.cat(piece_entropies, dim=0))
 
     res = {
         "log_probs": log_probs_list,
@@ -241,7 +256,7 @@ def get_values(
         per sample.
     """
     value_list = []
-    for logits_chunk, _ in get_responses(
+    for pieces in get_responses(
         logits,
         args=args,
         unconcat_tokens=unconcat_tokens,
@@ -249,9 +264,14 @@ def get_values(
         response_lengths=response_lengths,
         max_seq_lens=max_seq_lens,
     ):
-        assert logits_chunk.size(-1) == 1, f"{logits_chunk.shape}"
-        # upcast (no-op for fp32) so value-head outputs stay fp32 even when logits arrive bf16
-        value_list.append(logits_chunk.squeeze(-1).float())
+        piece_values = []
+        for logits_chunk, tokens_chunk in pieces:
+            if tokens_chunk.size(0) == 0:
+                continue
+            assert logits_chunk.size(-1) == 1, f"{logits_chunk.shape}"
+            # upcast (no-op for fp32) so value-head outputs stay fp32 even when logits arrive bf16
+            piece_values.append(logits_chunk.squeeze(-1).float())
+        value_list.append(piece_values[0] if len(piece_values) == 1 else torch.cat(piece_values, dim=0))
 
     res = {
         "values": value_list,
