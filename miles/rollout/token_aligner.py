@@ -1340,6 +1340,129 @@ except ImportError:
     _ALIGN_DP_HAS_NUMBA = False
 
 
+def _align_text_hash(text: str, *, ignore_leading_char_diff: bool) -> np.int64:
+    if ignore_leading_char_diff:
+        text = canonical_token(text)
+    return np.int64(hash(text) & 0x7FFFFFFFFFFFFFFF)
+
+
+def _build_token_hashes(tokens: list[str], *, ignore_leading_char_diff: bool) -> np.ndarray:
+    return np.fromiter(
+        (_align_text_hash(token, ignore_leading_char_diff=ignore_leading_char_diff) for token in tokens),
+        dtype=np.int64,
+        count=len(tokens),
+    )
+
+
+def _build_span_hash_table(
+    tokens: list[str],
+    *,
+    max_combination_len: int,
+    ignore_leading_char_diff: bool,
+) -> np.ndarray:
+    """Hash joined token spans once per (end, k); reused across the opposite axis."""
+    n = len(tokens)
+    nk = max(0, max_combination_len - 1)
+    table = np.zeros((n, nk), dtype=np.int64)
+    if n == 0 or nk == 0:
+        return table
+
+    join_cache: dict[tuple[int, int], str] = {}
+    for end in range(n):
+        for k in range(2, min(end + 2, max_combination_len + 1)):
+            start = end - k + 1
+            if start < 0:
+                continue
+            span_key = (start, end + 1)
+            span = join_cache.get(span_key)
+            if span is None:
+                span = "".join(tokens[start : end + 1])
+                join_cache[span_key] = span
+            table[end, k - 2] = _align_text_hash(span, ignore_leading_char_diff=ignore_leading_char_diff)
+    return table
+
+
+def _align_precompute_match_python(
+    student_hashes: np.ndarray,
+    teacher_hashes: np.ndarray,
+    exact_match_score: float,
+) -> np.ndarray:
+    n1, n2 = len(student_hashes), len(teacher_hashes)
+    match = np.empty((n1, n2), dtype=np.float32)
+    mismatch_score = -exact_match_score
+    for si in range(n1):
+        student_hash = student_hashes[si]
+        for tj in range(n2):
+            if student_hash == teacher_hashes[tj]:
+                match[si, tj] = exact_match_score
+            else:
+                match[si, tj] = mismatch_score
+    return match
+
+
+def _align_precompute_comb_python(
+    student_hashes: np.ndarray,
+    teacher_hashes: np.ndarray,
+    teacher_span_hashes: np.ndarray,
+    student_span_hashes: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    n1, n2 = len(student_hashes), len(teacher_hashes)
+    nk = teacher_span_hashes.shape[1]
+    comb_s1 = np.zeros((n1, n2, nk), dtype=np.bool_)
+    comb_s2 = np.zeros((n1, n2, nk), dtype=np.bool_)
+    for si in range(n1):
+        student_hash = student_hashes[si]
+        for tj in range(n2):
+            teacher_hash = teacher_hashes[tj]
+            for k_idx in range(nk):
+                comb_s1[si, tj, k_idx] = student_hash == teacher_span_hashes[tj, k_idx]
+                comb_s2[si, tj, k_idx] = teacher_hash == student_span_hashes[si, k_idx]
+    return comb_s1, comb_s2
+
+
+if _ALIGN_DP_HAS_NUMBA:
+
+    @_align_njit(cache=True)
+    def _align_precompute_match_numba(
+        student_hashes: np.ndarray,
+        teacher_hashes: np.ndarray,
+        exact_match_score: float,
+    ) -> np.ndarray:
+        n1 = student_hashes.shape[0]
+        n2 = teacher_hashes.shape[0]
+        match = np.empty((n1, n2), dtype=np.float32)
+        mismatch_score = -exact_match_score
+        for si in range(n1):
+            student_hash = student_hashes[si]
+            for tj in range(n2):
+                if student_hash == teacher_hashes[tj]:
+                    match[si, tj] = exact_match_score
+                else:
+                    match[si, tj] = mismatch_score
+        return match
+
+    @_align_njit(cache=True)
+    def _align_precompute_comb_numba(
+        student_hashes: np.ndarray,
+        teacher_hashes: np.ndarray,
+        teacher_span_hashes: np.ndarray,
+        student_span_hashes: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        n1 = student_hashes.shape[0]
+        n2 = teacher_hashes.shape[0]
+        nk = teacher_span_hashes.shape[1]
+        comb_s1 = np.zeros((n1, n2, nk), dtype=np.bool_)
+        comb_s2 = np.zeros((n1, n2, nk), dtype=np.bool_)
+        for si in range(n1):
+            student_hash = student_hashes[si]
+            for tj in range(n2):
+                teacher_hash = teacher_hashes[tj]
+                for k_idx in range(nk):
+                    comb_s1[si, tj, k_idx] = student_hash == teacher_span_hashes[tj, k_idx]
+                    comb_s2[si, tj, k_idx] = teacher_hash == student_span_hashes[si, k_idx]
+        return comb_s1, comb_s2
+
+
 def _precompute_align_dp_tables(
     student_tokens: list[str],
     teacher_tokens: list[str],
@@ -1349,36 +1472,34 @@ def _precompute_align_dp_tables(
     ignore_leading_char_diff: bool,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Precompute diagonal match scores and combination eligibility tables."""
-    n1, n2 = len(student_tokens), len(teacher_tokens)
-    match = np.empty((n1, n2), dtype=np.float32)
-    for si in range(n1):
-        for tj in range(n2):
-            if _strings_equal_flexible(
-                student_tokens[si], teacher_tokens[tj], ignore_leading_char_diff
-            ):
-                match[si, tj] = exact_match_score
-            else:
-                match[si, tj] = -exact_match_score
-
-    nk = max(0, max_combination_len - 1)
-    comb_s1 = np.zeros((n1, n2, nk), dtype=np.bool_)
-    comb_s2 = np.zeros((n1, n2, nk), dtype=np.bool_)
-    for si in range(n1):
-        for tj in range(n2):
-            for k in range(2, min(tj + 2, max_combination_len + 1)):
-                if tj - k + 1 < 0:
-                    continue
-                teacher_span = "".join(teacher_tokens[tj - k + 1 : tj + 1])
-                comb_s1[si, tj, k - 2] = _strings_equal_flexible(
-                    student_tokens[si], teacher_span, ignore_leading_char_diff
-                )
-            for k in range(2, min(si + 2, max_combination_len + 1)):
-                if si - k + 1 < 0:
-                    continue
-                student_span = "".join(student_tokens[si - k + 1 : si + 1])
-                comb_s2[si, tj, k - 2] = _strings_equal_flexible(
-                    teacher_tokens[tj], student_span, ignore_leading_char_diff
-                )
+    student_hashes = _build_token_hashes(student_tokens, ignore_leading_char_diff=ignore_leading_char_diff)
+    teacher_hashes = _build_token_hashes(teacher_tokens, ignore_leading_char_diff=ignore_leading_char_diff)
+    teacher_span_hashes = _build_span_hash_table(
+        teacher_tokens,
+        max_combination_len=max_combination_len,
+        ignore_leading_char_diff=ignore_leading_char_diff,
+    )
+    student_span_hashes = _build_span_hash_table(
+        student_tokens,
+        max_combination_len=max_combination_len,
+        ignore_leading_char_diff=ignore_leading_char_diff,
+    )
+    if _ALIGN_DP_HAS_NUMBA:
+        match = _align_precompute_match_numba(student_hashes, teacher_hashes, float(exact_match_score))
+        comb_s1, comb_s2 = _align_precompute_comb_numba(
+            student_hashes,
+            teacher_hashes,
+            teacher_span_hashes,
+            student_span_hashes,
+        )
+    else:
+        match = _align_precompute_match_python(student_hashes, teacher_hashes, float(exact_match_score))
+        comb_s1, comb_s2 = _align_precompute_comb_python(
+            student_hashes,
+            teacher_hashes,
+            teacher_span_hashes,
+            student_span_hashes,
+        )
     return match, comb_s1, comb_s2
 
 
