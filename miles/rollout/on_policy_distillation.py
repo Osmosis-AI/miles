@@ -905,14 +905,23 @@ def _build_decode_offsets_stream(
             continue
         segment = token_ids[prev:bound]
         if segment:
+            # step() may return None while byte-fallback / UTF-8 spans are buffered.
             piece = stream.step(backend_tokenizer, [int(token_id) for token_id in segment])
-            if piece:
+            if piece is not None:
                 text_parts.append(piece)
                 text_len += len(piece)
         offsets[bound] = text_len
         prev = bound
     offsets.setdefault(n, text_len)
-    return "".join(text_parts), offsets
+
+    full_text = "".join(text_parts)
+    canonical = tokenizer.decode(token_ids, **_DECODE_KWARGS)
+    if full_text != canonical:
+        full_text = canonical
+        offsets = {
+            bound: len(tokenizer.decode(token_ids[:bound], **_DECODE_KWARGS)) for bound in bounds
+        }
+    return full_text, offsets
 
 
 def _span_text_from_offsets(full_text: str, offsets: dict[int, int], positions: list[int]) -> str | None:
