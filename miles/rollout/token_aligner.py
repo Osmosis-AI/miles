@@ -507,7 +507,7 @@ class TokenAligner:
             ignore_leading_char_diff=ignore_leading_char_diff,
         )
         if not anchor_lengths:
-            return self._align_dp(student_tokens, teacher_tokens, **dp_kwargs)
+            return self._align_dp_fast(student_tokens, teacher_tokens, **dp_kwargs)
 
         # Find unique n-gram matches in both sequences.
         all_potential_anchors: list[tuple[int, int, int]] = []
@@ -576,7 +576,7 @@ class TokenAligner:
                 last_j = j + k - 1
 
         if not validated:
-            return self._align_dp(student_tokens, teacher_tokens, **dp_kwargs)
+            return self._align_dp_fast(student_tokens, teacher_tokens, **dp_kwargs)
 
         full_alignment: list[AlignmentPair] = []
         last_i, last_j = 0, 0
@@ -586,7 +586,7 @@ class TokenAligner:
                 teacher_tokens[last_j:j],
             )
             if student_seg or teacher_seg:
-                aligned_segment, _ = self._align_dp(
+                aligned_segment, _ = self._align_dp_fast(
                     student_seg, teacher_seg, **dp_kwargs
                 )
                 full_alignment.extend(
@@ -608,7 +608,7 @@ class TokenAligner:
 
         student_seg, teacher_seg = student_tokens[last_i:], teacher_tokens[last_j:]
         if student_seg or teacher_seg:
-            aligned_segment, _ = self._align_dp(student_seg, teacher_seg, **dp_kwargs)
+            aligned_segment, _ = self._align_dp_fast(student_seg, teacher_seg, **dp_kwargs)
             full_alignment.extend(self._shift_pairs(aligned_segment, last_i, last_j))
 
         return full_alignment, 0.0
@@ -771,6 +771,33 @@ class TokenAligner:
         return aligned, float(dp[n1, n2])
 
     @staticmethod
+    def _align_dp_fast(
+        student_tokens: list[str],
+        teacher_tokens: list[str],
+        *,
+        exact_match_score: float,
+        combination_score_multiplier: float,
+        gap_penalty: float,
+        max_combination_len: int,
+        ignore_leading_char_diff: bool,
+    ) -> tuple[list[AlignmentPair], float]:
+        """Optimized Needleman-Wunsch DP; same contract as :meth:`_align_dp`.
+
+        Precomputes match / combination tables once, then fills the DP table
+        with a vector-friendly kernel. Kept separate from :meth:`_align_dp` so
+        outputs can be compared during validation.
+        """
+        return _align_dp_fast_impl(
+            student_tokens,
+            teacher_tokens,
+            exact_match_score=exact_match_score,
+            combination_score_multiplier=combination_score_multiplier,
+            gap_penalty=gap_penalty,
+            max_combination_len=max_combination_len,
+            ignore_leading_char_diff=ignore_leading_char_diff,
+        )
+
+    @staticmethod
     def _shift_pairs(
         pairs: list[AlignmentPair], shift_s: int, shift_t: int
     ) -> list[AlignmentPair]:
@@ -912,7 +939,7 @@ class TokenAligner:
                 if cache_key in align_cache:
                     sub_pairs, perfect = align_cache[cache_key]
                 else:
-                    sub_pairs, _ = TokenAligner._align_dp(
+                    sub_pairs, _ = TokenAligner._align_dp_fast(
                         chunk_s1,
                         chunk_s2,
                         exact_match_score=exact_match_score,
@@ -1296,6 +1323,301 @@ def _try_merge_byte_buffer(
         return byte_tokens, byte_ranges
     except UnicodeDecodeError:
         return byte_tokens, byte_ranges
+
+
+# Trace move codes for :meth:`TokenAligner._align_dp_fast` (see ``_traceback_align_dp_fast``).
+_ALIGN_MOVE_DIAG = 0
+_ALIGN_MOVE_UP = 1
+_ALIGN_MOVE_LEFT = 2
+_ALIGN_MOVE_COMB_S1_S2_BASE = 10
+_ALIGN_MOVE_COMB_S2_S1_BASE = 20
+
+try:
+    from numba import njit as _align_njit
+
+    _ALIGN_DP_HAS_NUMBA = True
+except ImportError:
+    _ALIGN_DP_HAS_NUMBA = False
+
+
+def _precompute_align_dp_tables(
+    student_tokens: list[str],
+    teacher_tokens: list[str],
+    *,
+    exact_match_score: float,
+    max_combination_len: int,
+    ignore_leading_char_diff: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Precompute diagonal match scores and combination eligibility tables."""
+    n1, n2 = len(student_tokens), len(teacher_tokens)
+    match = np.empty((n1, n2), dtype=np.float32)
+    for si in range(n1):
+        for tj in range(n2):
+            if _strings_equal_flexible(
+                student_tokens[si], teacher_tokens[tj], ignore_leading_char_diff
+            ):
+                match[si, tj] = exact_match_score
+            else:
+                match[si, tj] = -exact_match_score
+
+    nk = max(0, max_combination_len - 1)
+    comb_s1 = np.zeros((n1, n2, nk), dtype=np.bool_)
+    comb_s2 = np.zeros((n1, n2, nk), dtype=np.bool_)
+    for si in range(n1):
+        for tj in range(n2):
+            for k in range(2, min(tj + 2, max_combination_len + 1)):
+                if tj - k + 1 < 0:
+                    continue
+                teacher_span = "".join(teacher_tokens[tj - k + 1 : tj + 1])
+                comb_s1[si, tj, k - 2] = _strings_equal_flexible(
+                    student_tokens[si], teacher_span, ignore_leading_char_diff
+                )
+            for k in range(2, min(si + 2, max_combination_len + 1)):
+                if si - k + 1 < 0:
+                    continue
+                student_span = "".join(student_tokens[si - k + 1 : si + 1])
+                comb_s2[si, tj, k - 2] = _strings_equal_flexible(
+                    teacher_tokens[tj], student_span, ignore_leading_char_diff
+                )
+    return match, comb_s1, comb_s2
+
+
+if _ALIGN_DP_HAS_NUMBA:
+
+    @_align_njit(cache=True)
+    def _align_dp_fast_fill_numba(
+        match: np.ndarray,
+        comb_s1: np.ndarray,
+        comb_s2: np.ndarray,
+        gap_penalty: float,
+        combination_score_multiplier: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        move_diag = 0
+        move_up = 1
+        move_left = 2
+        move_comb_s1_base = 10
+        move_comb_s2_base = 20
+
+        n1, n2 = match.shape
+        nk = comb_s1.shape[2]
+        dp = np.zeros((n1 + 1, n2 + 1), dtype=np.float32)
+        trace = np.zeros((n1 + 1, n2 + 1), dtype=np.int8)
+
+        for i in range(1, n1 + 1):
+            dp[i, 0] = dp[i - 1, 0] + gap_penalty
+            trace[i, 0] = move_up
+        for j in range(1, n2 + 1):
+            dp[0, j] = dp[0, j - 1] + gap_penalty
+            trace[0, j] = move_left
+
+        for i in range(1, n1 + 1):
+            si = i - 1
+            for j in range(1, n2 + 1):
+                tj = j - 1
+                max_score = dp[i - 1, j - 1] + match[si, tj]
+                best_move = move_diag
+
+                score_up = dp[i - 1, j] + gap_penalty
+                if score_up > max_score:
+                    max_score = score_up
+                    best_move = move_up
+                score_left = dp[i, j - 1] + gap_penalty
+                if score_left > max_score:
+                    max_score = score_left
+                    best_move = move_left
+
+                for k_idx in range(nk):
+                    k = k_idx + 2
+                    if j - k < 0:
+                        continue
+                    if comb_s1[si, tj, k_idx]:
+                        cand = dp[i - 1, j - k] + combination_score_multiplier * k
+                        if cand > max_score:
+                            max_score = cand
+                            best_move = move_comb_s1_base + k
+                    if i - k < 0:
+                        continue
+                    if comb_s2[si, tj, k_idx]:
+                        cand = dp[i - k, j - 1] + combination_score_multiplier * k
+                        if cand > max_score:
+                            max_score = cand
+                            best_move = move_comb_s2_base + k
+
+                dp[i, j] = max_score
+                trace[i, j] = best_move
+        return dp, trace
+
+
+def _align_dp_fast_fill_numpy(
+    match: np.ndarray,
+    comb_s1: np.ndarray,
+    comb_s2: np.ndarray,
+    gap_penalty: float,
+    combination_score_multiplier: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """NumPy fallback when numba is unavailable."""
+    if _ALIGN_DP_HAS_NUMBA:
+        return _align_dp_fast_fill_numba(
+            match, comb_s1, comb_s2, gap_penalty, combination_score_multiplier
+        )
+
+    n1, n2 = match.shape
+    nk = comb_s1.shape[2]
+    dp = np.zeros((n1 + 1, n2 + 1), dtype=np.float32)
+    trace = np.zeros((n1 + 1, n2 + 1), dtype=np.int8)
+
+    for i in range(1, n1 + 1):
+        dp[i, 0] = dp[i - 1, 0] + gap_penalty
+        trace[i, 0] = _ALIGN_MOVE_UP
+    for j in range(1, n2 + 1):
+        dp[0, j] = dp[0, j - 1] + gap_penalty
+        trace[0, j] = _ALIGN_MOVE_LEFT
+
+    for i in range(1, n1 + 1):
+        si = i - 1
+        for j in range(1, n2 + 1):
+            tj = j - 1
+            max_score = dp[i - 1, j - 1] + match[si, tj]
+            best_move = _ALIGN_MOVE_DIAG
+
+            score_up = dp[i - 1, j] + gap_penalty
+            if score_up > max_score:
+                max_score = score_up
+                best_move = _ALIGN_MOVE_UP
+            score_left = dp[i, j - 1] + gap_penalty
+            if score_left > max_score:
+                max_score = score_left
+                best_move = _ALIGN_MOVE_LEFT
+
+            for k_idx in range(nk):
+                k = k_idx + 2
+                if j - k >= 0 and comb_s1[si, tj, k_idx]:
+                    cand = dp[i - 1, j - k] + combination_score_multiplier * k
+                    if cand > max_score:
+                        max_score = cand
+                        best_move = _ALIGN_MOVE_COMB_S1_S2_BASE + k
+                if i - k >= 0 and comb_s2[si, tj, k_idx]:
+                    cand = dp[i - k, j - 1] + combination_score_multiplier * k
+                    if cand > max_score:
+                        max_score = cand
+                        best_move = _ALIGN_MOVE_COMB_S2_S1_BASE + k
+
+            dp[i, j] = max_score
+            trace[i, j] = best_move
+    return dp, trace
+
+
+def _traceback_align_dp_fast(
+    trace: np.ndarray,
+    student_tokens: list[str],
+    teacher_tokens: list[str],
+) -> list[AlignmentPair]:
+    n1, n2 = len(student_tokens), len(teacher_tokens)
+    aligned: list[AlignmentPair] = []
+    i, j = n1, n2
+    while i > 0 or j > 0:
+        move = int(trace[i, j])
+        if move == _ALIGN_MOVE_DIAG:
+            aligned.append(
+                AlignmentPair(
+                    s_tokens=[student_tokens[i - 1]],
+                    t_tokens=[teacher_tokens[j - 1]],
+                    s_start=i - 1,
+                    s_end=i,
+                    t_start=j - 1,
+                    t_end=j,
+                )
+            )
+            i -= 1
+            j -= 1
+        elif move == _ALIGN_MOVE_UP:
+            aligned.append(
+                AlignmentPair(
+                    s_tokens=[student_tokens[i - 1]],
+                    t_tokens=[],
+                    s_start=i - 1,
+                    s_end=i,
+                    t_start=-1,
+                    t_end=-1,
+                )
+            )
+            i -= 1
+        elif move == _ALIGN_MOVE_LEFT:
+            aligned.append(
+                AlignmentPair(
+                    s_tokens=[],
+                    t_tokens=[teacher_tokens[j - 1]],
+                    s_start=-1,
+                    s_end=-1,
+                    t_start=j - 1,
+                    t_end=j,
+                )
+            )
+            j -= 1
+        elif move >= _ALIGN_MOVE_COMB_S1_S2_BASE and move < _ALIGN_MOVE_COMB_S2_S1_BASE:
+            k = move - _ALIGN_MOVE_COMB_S1_S2_BASE
+            aligned.append(
+                AlignmentPair(
+                    s_tokens=[student_tokens[i - 1]],
+                    t_tokens=teacher_tokens[j - k : j],
+                    s_start=i - 1,
+                    s_end=i,
+                    t_start=j - k,
+                    t_end=j,
+                )
+            )
+            i -= 1
+            j -= k
+        elif move >= _ALIGN_MOVE_COMB_S2_S1_BASE:
+            k = move - _ALIGN_MOVE_COMB_S2_S1_BASE
+            aligned.append(
+                AlignmentPair(
+                    s_tokens=student_tokens[i - k : i],
+                    t_tokens=[teacher_tokens[j - 1]],
+                    s_start=i - k,
+                    s_end=i,
+                    t_start=j - 1,
+                    t_end=j,
+                )
+            )
+            i -= k
+            j -= 1
+        else:
+            break
+    aligned.reverse()
+    return aligned
+
+
+def _align_dp_fast_impl(
+    student_tokens: list[str],
+    teacher_tokens: list[str],
+    *,
+    exact_match_score: float,
+    combination_score_multiplier: float,
+    gap_penalty: float,
+    max_combination_len: int,
+    ignore_leading_char_diff: bool,
+) -> tuple[list[AlignmentPair], float]:
+    n1, n2 = len(student_tokens), len(teacher_tokens)
+    if n1 == 0 and n2 == 0:
+        return [], 0.0
+
+    match, comb_s1, comb_s2 = _precompute_align_dp_tables(
+        student_tokens,
+        teacher_tokens,
+        exact_match_score=exact_match_score,
+        max_combination_len=max_combination_len,
+        ignore_leading_char_diff=ignore_leading_char_diff,
+    )
+    dp, trace = _align_dp_fast_fill_numpy(
+        match,
+        comb_s1,
+        comb_s2,
+        float(gap_penalty),
+        float(combination_score_multiplier),
+    )
+    aligned = _traceback_align_dp_fast(trace, student_tokens, teacher_tokens)
+    return aligned, float(dp[n1, n2])
 
 
 def _strings_equal_flexible(s1: str, s2: str, ignore_leading_char_diff: bool) -> bool:

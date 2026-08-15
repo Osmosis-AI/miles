@@ -2,8 +2,10 @@ import asyncio
 import json
 import logging
 import math
+import os
 from argparse import Namespace
 from collections.abc import Iterable, Mapping
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from typing import Any
 
 import aiohttp
@@ -15,6 +17,14 @@ from miles.utils.processing_utils import encode_image_for_rollout_engine
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
+
+_DECODE_KWARGS = {
+    "skip_special_tokens": False,
+    "clean_up_tokenization_spaces": False,
+}
+
+_CROSS_VOCAB_ALIGN_WORKER: dict[str, Any] = {}
+_CROSS_VOCAB_ALIGN_POOL: ProcessPoolExecutor | None = None
 
 try:
     # Scoring responses carry O(response_len * top_k) logprob entries; stdlib json
@@ -863,22 +873,107 @@ async def reward_func_cross_vocab(args: Namespace, sample: Sample, **kwargs: Any
     return result
 
 
-def _decode_token_span(tokenizer, token_ids: list[int], positions: list[int]) -> str | None:
+def _decode_prefix_text(
+    tokenizer,
+    token_ids: list[int],
+    end: int,
+    prefix_cache: dict[int, str],
+) -> str:
+    cached = prefix_cache.get(end)
+    if cached is not None:
+        return cached
+    text = tokenizer.decode(token_ids[:end], **_DECODE_KWARGS)
+    prefix_cache[end] = text
+    return text
+
+
+def _decode_token_span(
+    tokenizer,
+    token_ids: list[int],
+    positions: list[int],
+    prefix_cache: dict[int, str] | None = None,
+) -> str | None:
     """Decode a contiguous token span with its left context preserved."""
     start = positions[0]
     end = positions[-1] + 1
     if positions != list(range(start, end)):
         return None
 
-    decode_kwargs = {
-        "skip_special_tokens": False,
-        "clean_up_tokenization_spaces": False,
-    }
-    prefix_text = tokenizer.decode(token_ids[:start], **decode_kwargs)
-    through_span_text = tokenizer.decode(token_ids[:end], **decode_kwargs)
+    if prefix_cache is None:
+        prefix_cache = {}
+    prefix_text = _decode_prefix_text(tokenizer, token_ids, start, prefix_cache)
+    through_span_text = _decode_prefix_text(tokenizer, token_ids, end, prefix_cache)
     if not through_span_text.startswith(prefix_text):
         return None
     return through_span_text[len(prefix_text) :]
+
+
+def _chunk_positions_by_id(chunk_ids: torch.Tensor, num_chunks: int) -> list[list[int]]:
+    """Map chunk index -> token positions in a single pass over ``chunk_ids``."""
+    positions: list[list[int]] = [[] for _ in range(num_chunks)]
+    for idx, chunk_id in enumerate(chunk_ids.tolist()):
+        if chunk_id >= 0:
+            positions[chunk_id].append(idx)
+    return positions
+
+
+def _init_cross_vocab_align_worker(student_path: str, teacher_path: str) -> None:
+    from transformers import AutoTokenizer
+
+    student_tok = AutoTokenizer.from_pretrained(student_path, trust_remote_code=True)
+    teacher_tok = AutoTokenizer.from_pretrained(teacher_path, trust_remote_code=True)
+    _CROSS_VOCAB_ALIGN_WORKER["aligner"] = TokenAligner(student_tok, teacher_tok)
+
+
+def _cross_vocab_align_sample_task(task: dict[str, Any]) -> dict[str, Any]:
+    """ProcessPool worker: align one sample and return serializable deltas."""
+    aligner = _CROSS_VOCAB_ALIGN_WORKER["aligner"]
+    try:
+        deltas, aligned_token_count, aligned_chunk_count = _aligned_chunk_logprob_deltas(
+            aligner,
+            task["student_ids"],
+            task["teacher_ids"],
+            task["student_log_probs"],
+            task["teacher_log_probs"],
+            protected_student_positions=set(task["protected_positions"]),
+        )
+        return {
+            "sample_index": task["sample_index"],
+            "deltas": deltas.tolist(),
+            "aligned_token_count": aligned_token_count,
+            "aligned_chunk_count": aligned_chunk_count,
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "sample_index": task["sample_index"],
+            "deltas": None,
+            "aligned_token_count": 0,
+            "aligned_chunk_count": 0,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _cross_vocab_align_workers(args: Namespace, num_tasks: int) -> int:
+    configured = int(getattr(args, "opd_cross_vocab_align_workers", 0) or 0)
+    if configured > 0:
+        return min(configured, num_tasks)
+    return min(num_tasks, os.cpu_count() or 1)
+
+
+def _get_cross_vocab_align_pool(args: Namespace, workers: int) -> ProcessPoolExecutor:
+    global _CROSS_VOCAB_ALIGN_POOL
+    if _CROSS_VOCAB_ALIGN_POOL is None:
+        student_path = args.hf_checkpoint
+        teacher_path = getattr(args, "teacher_tokenizer_path", None)
+        if not teacher_path:
+            raise ValueError("--teacher-tokenizer-path is required for xToken-aligned cross-tokenizer OPD.")
+        _CROSS_VOCAB_ALIGN_POOL = ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_init_cross_vocab_align_worker,
+            initargs=(student_path, teacher_path),
+        )
+    return _CROSS_VOCAB_ALIGN_POOL
 
 
 def _aligned_chunk_logprob_deltas(
@@ -910,31 +1005,52 @@ def _aligned_chunk_logprob_deltas(
     aligned_token_count = 0
     aligned_chunk_count = 0
 
-    for chunk_id in range(int(alignment.num_chunks[0])):
-        if not alignment.pair_valid[0, chunk_id] or not alignment.pair_is_correct[0, chunk_id]:
-            continue
+    num_chunks = int(alignment.num_chunks[0])
+    student_positions_by_chunk = _chunk_positions_by_id(student_chunk_ids, num_chunks)
+    teacher_positions_by_chunk = _chunk_positions_by_id(teacher_chunk_ids, num_chunks)
+    student_prefix_cache: dict[int, str] = {0: ""}
+    teacher_prefix_cache: dict[int, str] = {0: ""}
 
-        student_positions = torch.nonzero(student_chunk_ids == chunk_id, as_tuple=False).flatten().tolist()
-        teacher_positions = torch.nonzero(teacher_chunk_ids == chunk_id, as_tuple=False).flatten().tolist()
-        if not student_positions or not teacher_positions:
-            continue
-        if protected_student_positions.intersection(student_positions):
-            continue
+    with ThreadPoolExecutor(max_workers=2) as decode_executor:
+        for chunk_id in range(num_chunks):
+            if not alignment.pair_valid[0, chunk_id] or not alignment.pair_is_correct[0, chunk_id]:
+                continue
 
-        student_chunk_text = _decode_token_span(aligner.student_tokenizer, student_ids, student_positions)
-        teacher_chunk_text = _decode_token_span(aligner.teacher_tokenizer, teacher_ids, teacher_positions)
-        if student_chunk_text is None or teacher_chunk_text is None or student_chunk_text != teacher_chunk_text:
-            continue
+            student_positions = student_positions_by_chunk[chunk_id]
+            teacher_positions = teacher_positions_by_chunk[chunk_id]
+            if not student_positions or not teacher_positions:
+                continue
+            if protected_student_positions.intersection(student_positions):
+                continue
 
-        student_chunk_log_prob = sum(float(student_log_probs[position]) for position in student_positions)
-        teacher_chunk_log_prob = sum(float(teacher_log_probs[position]) for position in teacher_positions)
-        if not math.isfinite(student_chunk_log_prob) or not math.isfinite(teacher_chunk_log_prob):
-            continue
+            student_future = decode_executor.submit(
+                _decode_token_span,
+                aligner.student_tokenizer,
+                student_ids,
+                student_positions,
+                student_prefix_cache,
+            )
+            teacher_future = decode_executor.submit(
+                _decode_token_span,
+                aligner.teacher_tokenizer,
+                teacher_ids,
+                teacher_positions,
+                teacher_prefix_cache,
+            )
+            student_chunk_text = student_future.result()
+            teacher_chunk_text = teacher_future.result()
+            if student_chunk_text is None or teacher_chunk_text is None or student_chunk_text != teacher_chunk_text:
+                continue
 
-        per_token_delta = (student_chunk_log_prob - teacher_chunk_log_prob) / len(student_positions)
-        deltas[student_positions] = per_token_delta
-        aligned_token_count += len(student_positions)
-        aligned_chunk_count += 1
+            student_chunk_log_prob = sum(float(student_log_probs[position]) for position in student_positions)
+            teacher_chunk_log_prob = sum(float(teacher_log_probs[position]) for position in teacher_positions)
+            if not math.isfinite(student_chunk_log_prob) or not math.isfinite(teacher_chunk_log_prob):
+                continue
+
+            per_token_delta = (student_chunk_log_prob - teacher_chunk_log_prob) / len(student_positions)
+            deltas[student_positions] = per_token_delta
+            aligned_token_count += len(student_positions)
+            aligned_chunk_count += 1
 
     return deltas, aligned_token_count, aligned_chunk_count
 
@@ -970,8 +1086,8 @@ def post_process_rewards_cross_vocab(
     else:
         aligner = None
 
-    overlaps = []
-    for sample in samples:
+    align_tasks: list[dict[str, Any]] = []
+    for sample_index, sample in enumerate(samples):
         if sample.response_length == 0:
             sample.opd_reverse_kl = torch.empty(0, dtype=torch.float32)
             sample.reward = 0.0
@@ -992,20 +1108,6 @@ def post_process_rewards_cross_vocab(
 
         try:
             teacher_ids, teacher_log_probs = _extract_teacher_response(reward)
-            student_ids = sample.tokens[-sample.response_length :]
-            student_log_probs = list(sample.rollout_log_probs)[-sample.response_length :]
-            protected_positions = _matching_token_positions(
-                student_ids,
-                _get_opd_mask_token_sequences(args),
-            )
-            deltas, aligned_token_count, aligned_chunk_count = _aligned_chunk_logprob_deltas(
-                aligner,
-                student_ids,
-                teacher_ids,
-                student_log_probs,
-                teacher_log_probs,
-                protected_student_positions=protected_positions,
-            )
         except (IndexError, KeyError, TypeError, ValueError) as exc:
             logger.warning(
                 "Invalid cross-tokenizer teacher response for sample index=%s; disabling OPD: %s",
@@ -1016,13 +1118,83 @@ def post_process_rewards_cross_vocab(
             sample.reward = 0.0
             continue
 
+        student_ids = sample.tokens[-sample.response_length :]
+        student_log_probs = list(sample.rollout_log_probs)[-sample.response_length :]
+        protected_positions = _matching_token_positions(
+            student_ids,
+            _get_opd_mask_token_sequences(args),
+        )
+        align_tasks.append(
+            {
+                "sample_index": sample_index,
+                "student_ids": student_ids,
+                "teacher_ids": teacher_ids,
+                "student_log_probs": student_log_probs,
+                "teacher_log_probs": teacher_log_probs,
+                "protected_positions": sorted(protected_positions),
+            }
+        )
+
+    align_results: dict[int, dict[str, Any]] = {}
+    if align_tasks:
+        workers = _cross_vocab_align_workers(args, len(align_tasks))
+        if workers > 1:
+            pool = _get_cross_vocab_align_pool(args, workers)
+            futures = [pool.submit(_cross_vocab_align_sample_task, task) for task in align_tasks]
+            for future in as_completed(futures):
+                result = future.result()
+                align_results[result["sample_index"]] = result
+        else:
+            assert aligner is not None
+            for task in align_tasks:
+                try:
+                    deltas, aligned_token_count, aligned_chunk_count = _aligned_chunk_logprob_deltas(
+                        aligner,
+                        task["student_ids"],
+                        task["teacher_ids"],
+                        task["student_log_probs"],
+                        task["teacher_log_probs"],
+                        protected_student_positions=set(task["protected_positions"]),
+                    )
+                    align_results[task["sample_index"]] = {
+                        "sample_index": task["sample_index"],
+                        "deltas": deltas.tolist(),
+                        "aligned_token_count": aligned_token_count,
+                        "aligned_chunk_count": aligned_chunk_count,
+                        "error": None,
+                    }
+                except Exception as exc:
+                    align_results[task["sample_index"]] = {
+                        "sample_index": task["sample_index"],
+                        "deltas": None,
+                        "aligned_token_count": 0,
+                        "aligned_chunk_count": 0,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+
+    overlaps = []
+    for task in align_tasks:
+        sample = samples[task["sample_index"]]
+        result = align_results[task["sample_index"]]
+        if result["error"] is not None:
+            logger.warning(
+                "Cross-vocab alignment failed for sample index=%s; disabling OPD: %s",
+                sample.index,
+                result["error"],
+            )
+            _use_zero_precomputed_kl(sample, "invalid_teacher_response")
+            sample.reward = 0.0
+            continue
+
+        aligned_token_count = int(result["aligned_token_count"])
+        aligned_chunk_count = int(result["aligned_chunk_count"])
         if aligned_token_count == 0:
             _use_zero_precomputed_kl(sample, "no_alignment")
             sample.reward = 0.0
             continue
 
+        sample.opd_reverse_kl = torch.tensor(result["deltas"], dtype=torch.float32)
         overlap = aligned_token_count / sample.response_length
-        sample.opd_reverse_kl = deltas
         sample.metadata = dict(sample.metadata or {})
         sample.metadata["cross_vocab_token_overlap"] = overlap
         sample.metadata["cross_vocab_aligned_chunks"] = aligned_chunk_count
