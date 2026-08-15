@@ -60,16 +60,13 @@ def get_rollout_data(
             for t, sid in zip(rollout_data["tokens"], seq_witness_ids, strict=True)
         ]
 
-    if "multimodal_train_inputs" in rollout_data:
-        # Move multimodal training tensors to GPU in advance
-        rollout_data["multimodal_train_inputs"] = [
-            (
-                {key: tensor.to(device=torch.cuda.current_device()) for key, tensor in mm_dict.items()}
-                if mm_dict is not None
-                else None
-            )
-            for mm_dict in rollout_data["multimodal_train_inputs"]
-        ]
+    # multimodal_train_inputs deliberately stays on CPU here. Moving the ENTIRE
+    # rollout's tensors to GPU up front makes resident pixel_values scale with
+    # rollout_batch_size x n_samples_per_prompt x pages-per-sample; an uncapped
+    # multi-window VLM rollout is 30-60+ GB before a single forward runs, and the
+    # GatedDeltaNet backward OOMs against it ("Triton Error [CUDA]: out of memory").
+    # Only one micro-batch's images are needed at once, so the H2D copy happens per
+    # micro-batch in process_batch below (~hundreds of MB, one transfer per key).
 
     if args.qkv_format == "bshd":
         # TODO: micro-batch wise dynamic, possibly move to @data.py:get_data_iterator
@@ -335,6 +332,15 @@ def get_batch(
                     else:
                         multimodal_data[key] = torch.cat([multimodal_data[key], mm_tensor], dim=0)
                         multimodal_num_items[key].append(mm_tensor.size(0))
+        # The rollout's tensors live on CPU (see get_rollout_data); ship only this
+        # micro-batch to the GPU. Concatenating on CPU first means one transfer per
+        # key instead of one per sequence. Guarded with is_cuda so callers that pass
+        # already-device tensors (e.g. tests) are unaffected.
+        multimodal_data = {
+            key: (tensor if tensor.is_cuda
+                  else tensor.to(device=torch.cuda.current_device(), non_blocking=True))
+            for key, tensor in multimodal_data.items()
+        }
         batch["multimodal_train_inputs"] = multimodal_data
         batch["multimodal_num_items"] = multimodal_num_items
 
