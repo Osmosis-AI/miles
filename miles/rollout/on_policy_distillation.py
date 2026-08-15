@@ -882,33 +882,48 @@ def _backend_tokenizer(tokenizer) -> Any | None:
     return getattr(tokenizer, "_tokenizer", None)
 
 
-def _build_decode_offsets_stream(tokenizer, token_ids: list[int]) -> tuple[str, list[int]] | None:
-    """Decode a token sequence once via :class:`DecodeStream` and return char offsets."""
+def _build_decode_offsets_stream(
+    tokenizer,
+    token_ids: list[int],
+    boundary_indices: set[int],
+) -> tuple[str, dict[int, int]] | None:
+    """Decode via :class:`DecodeStream`, stepping token-id lists between chunk boundaries."""
     backend_tokenizer = _backend_tokenizer(tokenizer)
     if backend_tokenizer is None:
         return None
 
+    n = len(token_ids)
+    bounds = sorted({0, n, *boundary_indices})
     stream = DecodeStream(skip_special_tokens=_DECODE_KWARGS["skip_special_tokens"])
-    offsets = [0]
     text_parts: list[str] = []
     text_len = 0
-    for token_id in token_ids:
-        piece = stream.step(backend_tokenizer, int(token_id))
-        if piece:
-            text_parts.append(piece)
-            text_len += len(piece)
-        offsets.append(text_len)
+    offsets: dict[int, int] = {0: 0}
+    prev = 0
+    for bound in bounds[1:]:
+        if bound < prev:
+            offsets[bound] = text_len
+            continue
+        segment = token_ids[prev:bound]
+        if segment:
+            piece = stream.step(backend_tokenizer, [int(token_id) for token_id in segment])
+            if piece:
+                text_parts.append(piece)
+                text_len += len(piece)
+        offsets[bound] = text_len
+        prev = bound
+    offsets.setdefault(n, text_len)
     return "".join(text_parts), offsets
 
 
-def _span_text_from_offsets(full_text: str, offsets: list[int], positions: list[int]) -> str | None:
+def _span_text_from_offsets(full_text: str, offsets: dict[int, int], positions: list[int]) -> str | None:
     start = positions[0]
     end = positions[-1] + 1
     if positions != list(range(start, end)):
         return None
-    if start < 0 or end >= len(offsets):
+    try:
+        return full_text[offsets[start] : offsets[end]]
+    except KeyError:
         return None
-    return full_text[offsets[start] : offsets[end]]
 
 
 def _decode_prefix_text(
@@ -1047,8 +1062,26 @@ def _aligned_chunk_logprob_deltas(
     student_positions_by_chunk = _chunk_positions_by_id(student_chunk_ids, num_chunks)
     teacher_positions_by_chunk = _chunk_positions_by_id(teacher_chunk_ids, num_chunks)
 
-    student_stream = _build_decode_offsets_stream(aligner.student_tokenizer, student_ids)
-    teacher_stream = _build_decode_offsets_stream(aligner.teacher_tokenizer, teacher_ids)
+    student_boundaries: set[int] = set()
+    teacher_boundaries: set[int] = set()
+    for chunk_id in range(num_chunks):
+        if not alignment.pair_valid[0, chunk_id] or not alignment.pair_is_correct[0, chunk_id]:
+            continue
+        student_positions = student_positions_by_chunk[chunk_id]
+        teacher_positions = teacher_positions_by_chunk[chunk_id]
+        if student_positions:
+            student_boundaries.add(student_positions[0])
+            student_boundaries.add(student_positions[-1] + 1)
+        if teacher_positions:
+            teacher_boundaries.add(teacher_positions[0])
+            teacher_boundaries.add(teacher_positions[-1] + 1)
+
+    student_stream = _build_decode_offsets_stream(
+        aligner.student_tokenizer, student_ids, student_boundaries
+    )
+    teacher_stream = _build_decode_offsets_stream(
+        aligner.teacher_tokenizer, teacher_ids, teacher_boundaries
+    )
     use_decode_stream = student_stream is not None and teacher_stream is not None
     if use_decode_stream:
         student_text, student_offsets = student_stream
