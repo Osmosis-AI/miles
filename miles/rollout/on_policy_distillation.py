@@ -6,11 +6,13 @@ import os
 from argparse import Namespace
 from collections.abc import Iterable, Mapping
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from typing import Any
 
 import aiohttp
 import numpy as np
 import torch
+from tokenizers.decoders import DecodeStream
 
 from miles.rollout.token_aligner import TokenAligner
 from miles.utils.processing_utils import encode_image_for_rollout_engine
@@ -873,6 +875,42 @@ async def reward_func_cross_vocab(args: Namespace, sample: Sample, **kwargs: Any
     return result
 
 
+def _backend_tokenizer(tokenizer) -> Any | None:
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is not None:
+        return backend
+    return getattr(tokenizer, "_tokenizer", None)
+
+
+def _build_decode_offsets_stream(tokenizer, token_ids: list[int]) -> tuple[str, list[int]] | None:
+    """Decode a token sequence once via :class:`DecodeStream` and return char offsets."""
+    backend_tokenizer = _backend_tokenizer(tokenizer)
+    if backend_tokenizer is None:
+        return None
+
+    stream = DecodeStream(skip_special_tokens=_DECODE_KWARGS["skip_special_tokens"])
+    offsets = [0]
+    text_parts: list[str] = []
+    text_len = 0
+    for token_id in token_ids:
+        piece = stream.step(backend_tokenizer, int(token_id))
+        if piece:
+            text_parts.append(piece)
+            text_len += len(piece)
+        offsets.append(text_len)
+    return "".join(text_parts), offsets
+
+
+def _span_text_from_offsets(full_text: str, offsets: list[int], positions: list[int]) -> str | None:
+    start = positions[0]
+    end = positions[-1] + 1
+    if positions != list(range(start, end)):
+        return None
+    if start < 0 or end >= len(offsets):
+        return None
+    return full_text[offsets[start] : offsets[end]]
+
+
 def _decode_prefix_text(
     tokenizer,
     token_ids: list[int],
@@ -1008,10 +1046,19 @@ def _aligned_chunk_logprob_deltas(
     num_chunks = int(alignment.num_chunks[0])
     student_positions_by_chunk = _chunk_positions_by_id(student_chunk_ids, num_chunks)
     teacher_positions_by_chunk = _chunk_positions_by_id(teacher_chunk_ids, num_chunks)
-    student_prefix_cache: dict[int, str] = {0: ""}
-    teacher_prefix_cache: dict[int, str] = {0: ""}
 
-    with ThreadPoolExecutor(max_workers=2) as decode_executor:
+    student_stream = _build_decode_offsets_stream(aligner.student_tokenizer, student_ids)
+    teacher_stream = _build_decode_offsets_stream(aligner.teacher_tokenizer, teacher_ids)
+    use_decode_stream = student_stream is not None and teacher_stream is not None
+    if use_decode_stream:
+        student_text, student_offsets = student_stream
+        teacher_text, teacher_offsets = teacher_stream
+    else:
+        student_prefix_cache = {0: ""}
+        teacher_prefix_cache = {0: ""}
+
+    decode_executor_ctx = nullcontext() if use_decode_stream else ThreadPoolExecutor(max_workers=2)
+    with decode_executor_ctx:
         for chunk_id in range(num_chunks):
             if not alignment.pair_valid[0, chunk_id] or not alignment.pair_is_correct[0, chunk_id]:
                 continue
@@ -1023,22 +1070,26 @@ def _aligned_chunk_logprob_deltas(
             if protected_student_positions.intersection(student_positions):
                 continue
 
-            student_future = decode_executor.submit(
-                _decode_token_span,
-                aligner.student_tokenizer,
-                student_ids,
-                student_positions,
-                student_prefix_cache,
-            )
-            teacher_future = decode_executor.submit(
-                _decode_token_span,
-                aligner.teacher_tokenizer,
-                teacher_ids,
-                teacher_positions,
-                teacher_prefix_cache,
-            )
-            student_chunk_text = student_future.result()
-            teacher_chunk_text = teacher_future.result()
+            if use_decode_stream:
+                student_chunk_text = _span_text_from_offsets(student_text, student_offsets, student_positions)
+                teacher_chunk_text = _span_text_from_offsets(teacher_text, teacher_offsets, teacher_positions)
+            else:
+                student_future = decode_executor.submit(
+                    _decode_token_span,
+                    aligner.student_tokenizer,
+                    student_ids,
+                    student_positions,
+                    student_prefix_cache,
+                )
+                teacher_future = decode_executor.submit(
+                    _decode_token_span,
+                    aligner.teacher_tokenizer,
+                    teacher_ids,
+                    teacher_positions,
+                    teacher_prefix_cache,
+                )
+                student_chunk_text = student_future.result()
+                teacher_chunk_text = teacher_future.result()
             if student_chunk_text is None or teacher_chunk_text is None or student_chunk_text != teacher_chunk_text:
                 continue
 
