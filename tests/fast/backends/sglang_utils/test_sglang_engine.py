@@ -4,6 +4,35 @@ import pytest
 import requests
 
 
+def test_init_normal_normalizes_host_before_server_args_resolution(monkeypatch):
+    pytest.importorskip("sglang")
+    from miles.backends.sglang_utils import sglang_engine
+
+    captured = {}
+
+    class ReadOnlyServerArgs:
+        def __init__(self, **kwargs):
+            self.host = kwargs["host"]
+
+    def fake_launch(server_args):
+        captured["host"] = server_args.host
+        return object()
+
+    monkeypatch.setattr(sglang_engine, "ServerArgs", ReadOnlyServerArgs)
+    monkeypatch.setattr(sglang_engine, "launch_server_process", fake_launch)
+
+    engine = sglang_engine.SGLangEngine.__new__(sglang_engine.SGLangEngine)
+    engine.node_rank = 1
+    engine.router_ip = None
+    engine.router_port = None
+    server_args_dict = {"host": "[::1]"}
+
+    engine._init_normal(server_args_dict)
+
+    assert captured["host"] == "::1"
+    assert server_args_dict["host"] == "[::1]"
+
+
 def test_flush_cache_sleeps_between_pending_request_retries(monkeypatch):
     """Regression test for the fully_async weight-update crash: sglang
     returns 400 (not an exception) while requests are still pending, so the
