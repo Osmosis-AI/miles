@@ -143,6 +143,35 @@ def _patch_initialize_side_effects(stack: ExitStack) -> None:
     stack.enter_context(patch("miles.backends.megatron_utils.model.check_model_hashes"))
 
 
+def test_initialize_random_init_skips_checkpoint_load():
+    from miles.backends.megatron_utils.model import initialize_model_and_optimizer
+
+    args = Namespace(
+        debug_random_init=True,
+        use_checkpoint_opt_param_scheduler=False,
+        global_batch_size=8,
+        load=None,
+    )
+    model = [_FakeModelChunk()]
+    optimizer = object()
+    opt_param_scheduler = MagicMock()
+
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch(
+                "miles.backends.megatron_utils.model.setup_model_and_optimizer",
+                return_value=(model, optimizer, opt_param_scheduler),
+            )
+        )
+        load_checkpoint = stack.enter_context(patch("miles.backends.megatron_utils.model.load_checkpoint"))
+        _patch_initialize_side_effects(stack)
+        result = initialize_model_and_optimizer(args)
+
+    assert result == (model, optimizer, opt_param_scheduler, 0)
+    load_checkpoint.assert_not_called()
+    opt_param_scheduler.step.assert_called_once_with(increment=0)
+
+
 def test_initialize_does_not_step_scheduler_restored_from_checkpoint():
     from miles.backends.megatron_utils.model import initialize_model_and_optimizer
 

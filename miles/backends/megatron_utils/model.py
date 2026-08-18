@@ -141,7 +141,11 @@ def setup_model_and_optimizer(
               ``None`` when ``--debug-disable-optimizer`` is set.
     """
     assert not args.moe_use_upcycling
-    assert args.load is not None or args.pretrained_checkpoint is not None
+    assert (
+        getattr(args, "debug_random_init", False)
+        or args.load is not None
+        or args.pretrained_checkpoint is not None
+    )
 
     # Multi-LoRA and single-LoRA (actor, bridge) both build via the bridge helper,
     # which picks the adapter type internally.
@@ -948,8 +952,13 @@ def initialize_model_and_optimizer(
         load_ctx = nullcontext()
 
     load_dir = getattr(args, "load", None)
-    # --load may be unset: setup_model_and_optimizer already asserted pretrained_checkpoint covers it.
-    if load_dir is None or _has_loadable_ckpt(load_dir):
+    if getattr(args, "debug_random_init", False):
+        if is_first_replica_megatron_main_rank():
+            logger.warning("Skipping checkpoint load; Megatron weights are randomly initialized")
+        iteration = 0
+    # --load may be unset: setup_model_and_optimizer already asserted
+    # pretrained_checkpoint covers it.
+    elif load_dir is None or _has_loadable_ckpt(load_dir):
         with load_ctx:
             iteration, _ = load_checkpoint(
                 model,

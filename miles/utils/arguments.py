@@ -339,6 +339,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--debug-random-init",
+                action="store_true",
+                default=False,
+                help=(
+                    "Debug-only: initialize Megatron weights randomly instead of loading a checkpoint. "
+                    "--hf-checkpoint is still required for model config, tokenization, and rollout metadata."
+                ),
+            )
+            parser.add_argument(
                 "--rematerialize-param-from-master-weight",
                 action="store_true",
                 help=(
@@ -3052,6 +3061,16 @@ def miles_validate_args(args):
     if args.debug_disable_optimizer:
         args.no_load_optim = True
         args.no_save_optim = True
+
+    if args.debug_random_init:
+        if args.train_backend != "megatron":
+            raise ValueError("--debug-random-init requires --train-backend megatron")
+        if args.megatron_to_hf_mode != "raw":
+            raise ValueError("--debug-random-init requires --megatron-to-hf-mode raw")
+        if not args.hf_checkpoint:
+            raise ValueError("--debug-random-init still requires --hf-checkpoint for model metadata")
+        if args.load is not None or args.ref_load is not None:
+            raise ValueError("--debug-random-init cannot be combined with --load or --ref-load")
 
     # Normalize the deprecated ``--chat-template-path=autofix`` alias to None
     # up-front so the rest of this block treats it as "no path given".
