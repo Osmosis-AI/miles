@@ -5,6 +5,28 @@ import pytest
 import requests
 
 
+def test_load_lora_adapter_uses_sglang_serialized_tensors_field():
+    pytest.importorskip("sglang")
+    from miles.backends.sglang_utils.sglang_engine import SGLangEngine
+
+    captured = {}
+    engine = SGLangEngine.__new__(SGLangEngine)
+    engine._make_request = lambda endpoint, payload: captured.update(
+        endpoint=endpoint, payload=payload
+    )
+
+    ranked_tensors = ["rank-0", "rank-1"]
+    engine.load_lora_adapter_from_tensors(
+        lora_name="adapter",
+        config_dict={"r": 8},
+        serialized_named_tensors=ranked_tensors,
+    )
+
+    assert captured["endpoint"] == "load_lora_adapter_from_tensors"
+    assert captured["payload"]["serialized_tensors"] == ranked_tensors
+    assert "serialized_named_tensors" not in captured["payload"]
+
+
 def test_make_request_logs_error_response(monkeypatch, caplog):
     pytest.importorskip("sglang")
     from miles.backends.sglang_utils.sglang_engine import SGLangEngine

@@ -400,7 +400,7 @@ class SGLangEngine(RayActor):
         if serialized_tensors is not None:
             payload["serialized_tensors"] = serialized_tensors
         else:
-            payload["serialized_named_tensors"] = serialized_named_tensors
+            payload["serialized_tensors"] = serialized_named_tensors
         if upsert:
             payload["upsert"] = True
         if load_format is not None:
