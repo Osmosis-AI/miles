@@ -1,7 +1,32 @@
+import logging
 import time
 
 import pytest
 import requests
+
+
+def test_make_request_logs_error_response(monkeypatch, caplog):
+    pytest.importorskip("sglang")
+    from miles.backends.sglang_utils.sglang_engine import SGLangEngine
+
+    class ErrorResponse:
+        status_code = 400
+        text = '{"success":false,"error_message":"invalid adapter tensors"}'
+
+        def raise_for_status(self):
+            raise requests.HTTPError("400 Client Error")
+
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: ErrorResponse())
+
+    engine = SGLangEngine.__new__(SGLangEngine)
+    engine.node_rank = 0
+    engine.server_host = "127.0.0.1"
+    engine.server_port = 30000
+
+    with caplog.at_level(logging.ERROR), pytest.raises(requests.HTTPError):
+        engine._make_request("load_lora_adapter_from_tensors")
+
+    assert "invalid adapter tensors" in caplog.text
 
 
 def test_init_normal_normalizes_host_before_server_args_resolution(monkeypatch):

@@ -286,9 +286,13 @@ class SGLangEngine(RayActor):
         response = requests.post(url, json=payload or {})
         try:
             response.raise_for_status()
-        except requests.exceptions.HTTPError as e:
-            if hasattr(e, "add_note"):
-                e.add_note(f"{response.text=}")
+        except requests.exceptions.HTTPError:
+            logger.error(
+                "SGLang request failed: endpoint=%s status=%s body=%s",
+                endpoint,
+                response.status_code,
+                response.text[:4096],
+            )
             raise
         return response.json()
 
