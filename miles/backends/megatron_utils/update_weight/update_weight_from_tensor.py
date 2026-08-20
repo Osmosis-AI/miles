@@ -2,6 +2,7 @@ import hashlib
 import logging
 import math
 import os
+import time
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -300,9 +301,12 @@ class UpdateWeightFromTensor:
 
             accumulated_named_tensors = _pp_assemble_full_adapter(accumulated_named_tensors)
 
+            load_start = time.monotonic()
             refs, long_lived_tensors = self._send_lora_params(accumulated_named_tensors)
-            results = ray.get(refs)
+            results = _ray_get_with_stall_warning(refs, what=f"load_lora_adapter_from_tensors({LORA_ADAPTER_NAME})")
             _check_weight_sync_results(results, is_lora=True)
+            if refs:
+                logger.info("lora sync: adapter load acknowledged in %.1fs", time.monotonic() - load_start)
             del long_lived_tensors
             del accumulated_named_tensors
             torch.cuda.ipc_collect()
@@ -447,6 +451,24 @@ def _repack_onto_fresh_storage(
     return {name: views.get(name, tensor) for name, tensor in named_tensors}
 
 
+def _ray_get_with_stall_warning(refs: list[ObjectRef], what: str, warn_interval_s: float = 60.0) -> list:
+    """ray.get(refs) that warns periodically while pending, so a hung engine call
+    surfaces in the training log instead of blocking silently."""
+    start = time.monotonic()
+    pending = list(refs)
+    while pending:
+        _, pending = ray.wait(pending, num_returns=len(pending), timeout=warn_interval_s)
+        if pending:
+            logger.warning(
+                "%s: %d/%d engine call(s) still pending after %.0fs",
+                what,
+                len(pending),
+                len(refs),
+                time.monotonic() - start,
+            )
+    return ray.get(refs)
+
+
 def _send_to_colocated_engine(
     hf_named_tensors: list[tuple[str, torch.Tensor]],
     *,
@@ -506,8 +528,18 @@ def _send_to_colocated_engine(
     refs = []
     if is_gather_src:
         if is_lora:
+            unload_start = time.monotonic()
             try:
-                ray.get(ipc_engine.unload_lora_adapter.remote(lora_name=lora_name))
+                unload_result = _ray_get_with_stall_warning(
+                    [ipc_engine.unload_lora_adapter.remote(lora_name=lora_name)],
+                    what=f"unload_lora_adapter({lora_name}) (engine drains in-flight LoRA requests before unloading)",
+                )[0]
+                logger.info(
+                    "lora sync: unload %s finished in %.1fs, result=%s",
+                    lora_name,
+                    time.monotonic() - unload_start,
+                    unload_result,
+                )
             except Exception as _unload_err:
                 logger.debug("lora unload before load skipped: %s", _unload_err)
 
@@ -520,6 +552,11 @@ def _send_to_colocated_engine(
                     for n, t in hf_named_tensors
                 }
 
+            logger.info(
+                "lora sync: dispatching load_lora_adapter_from_tensors(%s), %d local tensors",
+                lora_name,
+                len(hf_named_tensors),
+            )
             refs.append(
                 ipc_engine.load_lora_adapter_from_tensors.remote(
                     lora_name=lora_name,
