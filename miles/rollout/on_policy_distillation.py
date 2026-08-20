@@ -1,10 +1,11 @@
 import asyncio
+import codecs
 import json
 import logging
 import math
 import os
 from argparse import Namespace
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from typing import Any
@@ -882,19 +883,57 @@ def _backend_tokenizer(tokenizer) -> Any | None:
     return getattr(tokenizer, "_tokenizer", None)
 
 
+def _tiktoken_encoding(tokenizer) -> Any | None:
+    """The ``tiktoken.Encoding`` of a tiktoken-backed slow tokenizer (e.g. Kimi's
+    ``TikTokenTokenizer``, which has no Rust backend), or None."""
+    encoding = getattr(tokenizer, "model", None)
+    if callable(getattr(encoding, "decode_bytes", None)):
+        return encoding
+    return None
+
+
+def _segment_decode_stream(
+    tokenizer,
+) -> tuple[Callable[[list[int]], str | None], Callable[[], str]] | None:
+    """Incremental ``(step, flush)`` decode callables for *tokenizer*.
+
+    ``step`` maps a token-id segment to its text piece (None while bytes are
+    buffered); ``flush`` drains bytes still buffered after the last step.
+    Returns None when the tokenizer exposes neither a Rust backend nor a
+    tiktoken encoding.
+    """
+    backend_tokenizer = _backend_tokenizer(tokenizer)
+    if backend_tokenizer is not None:
+        stream = DecodeStream(skip_special_tokens=_DECODE_KWARGS["skip_special_tokens"])
+        return lambda segment: stream.step(backend_tokenizer, segment), lambda: ""
+
+    encoding = _tiktoken_encoding(tokenizer)
+    if encoding is not None:
+        # tiktoken is byte-level: segment byte-decodes concatenate exactly, and
+        # the incremental UTF-8 decoder buffers characters split across segment
+        # boundaries the same way DecodeStream does.  "replace" matches
+        # tiktoken's own lossy decode, so the canonical-text check below passes.
+        utf8_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        return (
+            lambda segment: utf8_decoder.decode(encoding.decode_bytes(segment)),
+            lambda: utf8_decoder.decode(b"", True),
+        )
+    return None
+
+
 def _build_decode_offsets_stream(
     tokenizer,
     token_ids: list[int],
     boundary_indices: set[int],
 ) -> tuple[str, dict[int, int]] | None:
-    """Decode via :class:`DecodeStream`, stepping token-id lists between chunk boundaries."""
-    backend_tokenizer = _backend_tokenizer(tokenizer)
-    if backend_tokenizer is None:
+    """Decode once through an incremental stream, stepping between chunk boundaries."""
+    stream = _segment_decode_stream(tokenizer)
+    if stream is None:
         return None
+    step, flush = stream
 
     n = len(token_ids)
     bounds = sorted({0, n, *boundary_indices})
-    stream = DecodeStream(skip_special_tokens=_DECODE_KWARGS["skip_special_tokens"])
     text_parts: list[str] = []
     text_len = 0
     offsets: dict[int, int] = {0: 0}
@@ -903,16 +942,20 @@ def _build_decode_offsets_stream(
         if bound < prev:
             offsets[bound] = text_len
             continue
-        segment = token_ids[prev:bound]
+        segment = [int(token_id) for token_id in token_ids[prev:bound]]
         if segment:
             # step() may return None while byte-fallback / UTF-8 spans are buffered.
-            piece = stream.step(backend_tokenizer, [int(token_id) for token_id in segment])
+            piece = step(segment)
             if piece is not None:
                 text_parts.append(piece)
                 text_len += len(piece)
         offsets[bound] = text_len
         prev = bound
-    offsets.setdefault(n, text_len)
+    tail = flush()
+    if tail:
+        text_parts.append(tail)
+        text_len += len(tail)
+    offsets[n] = text_len
 
     full_text = "".join(text_parts)
     canonical = tokenizer.decode(token_ids, **_DECODE_KWARGS)
@@ -1100,7 +1143,7 @@ def _aligned_chunk_logprob_deltas(
         teacher_prefix_cache = {0: ""}
 
     decode_executor_ctx = nullcontext() if use_decode_stream else ThreadPoolExecutor(max_workers=2)
-    with decode_executor_ctx:
+    with decode_executor_ctx as decode_executor:
         for chunk_id in range(num_chunks):
             if not alignment.pair_valid[0, chunk_id] or not alignment.pair_is_correct[0, chunk_id]:
                 continue
