@@ -1,5 +1,8 @@
 import logging
+import os
+import threading
 from argparse import Namespace
+from collections import OrderedDict
 from collections.abc import Sequence
 
 import torch
@@ -20,6 +23,54 @@ from .mm_data import expand_multimodal_rollout_data_in_place
 from .parallel import get_parallel_state
 
 logger = logging.getLogger(__name__)
+
+# Lazy multimodal train inputs. A rollout may ship {"__mm_refs__": [file refs...],
+# "__mm_processor__": hf_checkpoint} in place of pixel tensors; the tensors are then
+# rebuilt here, at the micro-batch consumption point, from the same files with the
+# same processor -- a deterministic function, so the result is identical to what the
+# rollout side produced at generation time. This keeps ~100 MB/sample of pixel data
+# (duplicated across every trajectory of a group) out of the rollout->train transfer.
+_MM_REF_PROCESSORS: dict = {}
+_MM_REF_CACHE: "OrderedDict[tuple, dict]" = OrderedDict()
+_MM_REF_CACHE_MAX = int(os.getenv("MILES_MM_REF_CACHE_ENTRIES", "32"))
+_MM_REF_LOCK = threading.Lock()
+
+
+def materialize_mm_refs(mm_input_dict):
+    """Ref dict -> pixel tensors; anything else passes through untouched.
+
+    The LRU is keyed on the ref tuple, so the n trajectories of a GRPO group that
+    land on the same DP rank decode their shared window once, not n times.
+    """
+    if not isinstance(mm_input_dict, dict) or "__mm_refs__" not in mm_input_dict:
+        return mm_input_dict
+    refs = tuple(mm_input_dict["__mm_refs__"])
+    with _MM_REF_LOCK:
+        hit = _MM_REF_CACHE.get(refs)
+        if hit is not None:
+            _MM_REF_CACHE.move_to_end(refs)
+            return hit
+
+    path = mm_input_dict["__mm_processor__"]
+    processor = _MM_REF_PROCESSORS.get(path)
+    if processor is None:
+        from transformers import AutoProcessor
+
+        processor = AutoProcessor.from_pretrained(path, trust_remote_code=True)
+        _MM_REF_PROCESSORS[path] = processor
+
+    from miles.utils.processing_utils import resolve_deferred_media
+
+    images = resolve_deferred_media({"image": list(refs)}, processor)["images"]
+    out = processor.image_processor(images=images, return_tensors="pt")
+    tensors = {k: v for k, v in out.items() if isinstance(v, torch.Tensor)}
+
+    with _MM_REF_LOCK:
+        _MM_REF_CACHE[refs] = tensors
+        _MM_REF_CACHE.move_to_end(refs)
+        while len(_MM_REF_CACHE) > _MM_REF_CACHE_MAX:
+            _MM_REF_CACHE.popitem(last=False)
+    return tensors
 
 
 def _rollout_logprob_dtype(args: Namespace) -> torch.dtype:
@@ -324,6 +375,7 @@ def get_batch(
         multimodal_data = {}  # key -> concatenated tensor
         multimodal_num_items = {}  # key -> list of item counts per sequence
         for mm_input_dict in multimodal_train_inputs:
+            mm_input_dict = materialize_mm_refs(mm_input_dict)
             if mm_input_dict is not None:
                 for key, mm_tensor in mm_input_dict.items():
                     if key not in multimodal_data:
