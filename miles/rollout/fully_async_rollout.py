@@ -15,9 +15,20 @@ from miles.utils.types import Sample
 logger = logging.getLogger(__name__)
 
 
-def group_oldest_weight_version(group: list[Sample]) -> int | None:
+def _flat_samples(group):
+    """Iterate leaf Samples. A custom generate fn may return list[Sample] per
+    trajectory (GenerateFnOutput.samples is Sample | list[Sample]), making a
+    group list[list[Sample]]; every inspection here must tolerate both."""
+    for item in group:
+        if isinstance(item, list):
+            yield from item
+        else:
+            yield item
+
+
+def group_oldest_weight_version(group) -> int | None:
     """Return the minimum weight version across all trajectories and turns in a group."""
-    versions = [s.oldest_weight_version for s in group if s.oldest_weight_version is not None]
+    versions = [s.oldest_weight_version for s in _flat_samples(group) if s.oldest_weight_version is not None]
     return min(versions) if versions else None
 
 
@@ -258,13 +269,13 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
             # If any sample in the group was aborted, return the whole group to the data buffer
             # and do not forward it to the training engine.
             try:
-                any_aborted = any([sample.status == Sample.Status.ABORTED for sample in group])
+                any_aborted = any(sample.status == Sample.Status.ABORTED for sample in _flat_samples(group))
             except Exception:
                 any_aborted = False
 
             if any_aborted:
                 try:
-                    for s in group:
+                    for s in _flat_samples(group):
                         s.reset_for_retry()
                     data_buffer.add_samples([group])
                     print(f"Returned aborted group {group_id} to data buffer", flush=True)
@@ -280,7 +291,7 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
                 staleness_values.append(staleness)
                 if staleness > args.max_weight_staleness:
                     try:
-                        for s in group:
+                        for s in _flat_samples(group):
                             s.reset_for_retry()
                         data_buffer.add_samples([group])
                     except Exception as e:
@@ -296,8 +307,8 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
 
             if do_print:
                 print(
-                    f"First rollout sample: {[group[0].prompt + group[0].response]}, "
-                    f"label: {group[0].label}, reward: {group[0].reward}",
+                    f"First rollout sample: {[(_f := next(_flat_samples(group))).prompt + _f.response]}, "
+                    f"label: {_f.label}, reward: {_f.reward}",
                     flush=True,
                 )
                 do_print = False
@@ -332,12 +343,12 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
 
     if data:
         print(
-            f"Finish rollout: {[data[-1][0].prompt + data[-1][0].response]}, "
-            f"label: {data[-1][0].label}, reward: {data[-1][0].reward}",
+            f"Finish rollout: {[(_l := next(_flat_samples(data[-1]))).prompt + _l.response]}, "
+            f"label: {_l.label}, reward: {_l.reward}",
             flush=True,
         )
 
-    data = sorted(data, key=lambda group: group[0].index)
+    data = sorted(data, key=lambda group: next(_flat_samples(group)).index)
     return data
 
 
