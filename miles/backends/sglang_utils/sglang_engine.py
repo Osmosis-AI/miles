@@ -265,12 +265,15 @@ class SGLangEngine(RayActor):
                 )
             response.raise_for_status()
 
-    def _make_request(self, endpoint: str, payload: dict | None = None):
+    def _make_request(self, endpoint: str, payload: dict | None = None, retry_on_timeout: bool = True):
         """Make a POST request to the specified endpoint with the given payload.
 
         Args:
             endpoint: The API endpoint to call
             payload: The JSON payload to send (default: empty dict)
+            retry_on_timeout: re-POST after a read timeout. Must be False for
+                endpoints paired with a one-shot side channel (NCCL broadcast),
+                where a duplicate server-side handler corrupts the collective.
 
         Returns:
             The JSON response from the server
@@ -282,10 +285,9 @@ class SGLangEngine(RayActor):
         # Escalating read timeouts: a healthy engine answers these endpoints in
         # seconds; a request that never returns means the server's model-update
         # writer lock was starved by a leaked reader, and waiting forever turns
-        # that into a silent whole-run stall. Endpoints here are idempotent, so
-        # re-POSTing after a timeout is safe.
+        # that into a silent whole-run stall.
         last_exc: requests.exceptions.Timeout | None = None
-        for read_timeout in (30, 60, 120):
+        for read_timeout in (30, 60, 120) if retry_on_timeout else (210,):
             try:
                 response = requests.post(url, json=payload or {}, timeout=(10, read_timeout))
             except requests.exceptions.Timeout as e:
@@ -298,6 +300,18 @@ class SGLangEngine(RayActor):
             try:
                 response.raise_for_status()
             except requests.exceptions.HTTPError as e:
+                # A retried unload racing its own timed-out first attempt gets
+                # 400 "not loaded"; the adapter is gone, which is what we asked.
+                if (
+                    endpoint == "unload_lora_adapter"
+                    and last_exc is not None
+                    and response.status_code == 400
+                ):
+                    logger.warning(
+                        f"{endpoint} retry got 400 after an earlier timeout; "
+                        "treating as already unloaded"
+                    )
+                    return response.json()
                 if hasattr(e, "add_note"):
                     e.add_note(f"{response.text=}")
                 raise
@@ -445,6 +459,7 @@ class SGLangEngine(RayActor):
         return self._make_request(
             "load_lora_adapter_from_distributed",
             payload,
+            retry_on_timeout=False,
         )
 
     def flush_cache(self):
