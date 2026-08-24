@@ -279,14 +279,32 @@ class SGLangEngine(RayActor):
             return
 
         url = f"http://{self.server_host}:{self.server_port}/{endpoint}"
-        response = requests.post(url, json=payload or {})
-        try:
-            response.raise_for_status()
-        except requests.exceptions.HTTPError as e:
-            if hasattr(e, "add_note"):
-                e.add_note(f"{response.text=}")
-            raise
-        return response.json()
+        # Escalating read timeouts: a healthy engine answers these endpoints in
+        # seconds; a request that never returns means the server's model-update
+        # writer lock was starved by a leaked reader, and waiting forever turns
+        # that into a silent whole-run stall. Endpoints here are idempotent, so
+        # re-POSTing after a timeout is safe.
+        last_exc: requests.exceptions.Timeout | None = None
+        for read_timeout in (30, 60, 120):
+            try:
+                response = requests.post(url, json=payload or {}, timeout=(10, read_timeout))
+            except requests.exceptions.Timeout as e:
+                last_exc = e
+                logger.warning(
+                    f"{endpoint} on {self.server_host}:{self.server_port} timed out "
+                    f"after {read_timeout}s, retrying"
+                )
+                continue
+            try:
+                response.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                if hasattr(e, "add_note"):
+                    e.add_note(f"{response.text=}")
+                raise
+            return response.json()
+        raise RuntimeError(
+            f"{endpoint} on {self.server_host}:{self.server_port} timed out on all retries"
+        ) from last_exc
 
     def health_generate(self, timeout: float = 5.0) -> bool:
         """Run /health_generate on the underlying SGLang HTTP server.
