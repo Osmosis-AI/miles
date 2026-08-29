@@ -17,6 +17,7 @@ from miles.backends.training_utils.loss_hub.math_utils import (
     compute_gspo_kl,
     compute_opsm_mask,
     compute_policy_loss,
+    compute_steer_weight,
 )
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.misc import load_function
@@ -96,7 +97,10 @@ def policy_loss_function(
     response_lengths = batch["response_lengths"]
     total_lengths = batch["total_lengths"]
     max_seq_lens = batch.get("max_seq_lens", None)
-    calculate_entropy = args.entropy_coef != 0 or args.observe_training_entropy
+    use_steer = getattr(args, "use_steer", False)
+    # STEER weights tokens by their entropy change, so it needs per-token entropy. With
+    # entropy_coef == 0 that entropy is computed under no_grad, which is what we want.
+    calculate_entropy = args.entropy_coef != 0 or args.observe_training_entropy or use_steer
 
     log_probs_and_entropy = get_log_probs_and_entropy(
         logits,
@@ -180,6 +184,21 @@ def policy_loss_function(
     pg_loss, pg_clipfrac = compute_policy_loss(
         ppo_kl, advantages, args.eps_clip, args.eps_clip_high, getattr(args, "eps_clip_c", None)
     )
+
+    entropy = torch.cat(log_probs_and_entropy["entropy"], dim=0) if calculate_entropy else None
+
+    steer_weight = None
+    if use_steer:
+        steer_weight = compute_steer_weight(
+            log_probs=log_probs,
+            ppo_kl=ppo_kl,
+            advantages=advantages,
+            entropy=entropy,
+            clipfrac=pg_clipfrac,
+            active_tokens=active_tokens,
+            lambda_min=args.steer_lambda_min,
+        )
+        pg_loss = pg_loss * steer_weight
 
     if getattr(args, "dump_details", None) is not None:
         from miles.backends.training_utils.debug_dump import maybe_dump_policy_loss_debug
@@ -274,8 +293,6 @@ def policy_loss_function(
     entropy_loss = pg_loss.new_zeros(())
     loss = pg_loss
     if calculate_entropy:
-        entropy = log_probs_and_entropy["entropy"]
-        entropy = torch.cat(entropy, dim=0)
         entropy_loss = sum_of_sample_mean(entropy)
         if args.entropy_coef != 0:
             loss = pg_loss - args.entropy_coef * entropy_loss
@@ -358,6 +375,11 @@ def policy_loss_function(
 
     if args.use_opsm:
         reported_loss["opsm_clipfrac"] = opsm_clipfrac
+
+    if use_steer:
+        # Mean STEER weight: ~1.0 means STEER is not biting, ~lambda_min means it is
+        # attenuating nearly every token.
+        reported_loss["steer_weight"] = sum_of_sample_mean(steer_weight).clone().detach()
 
     # Add OPD metrics if available
     if batch.get("opd_reverse_kl") is not None:

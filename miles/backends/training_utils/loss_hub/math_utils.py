@@ -1,6 +1,7 @@
 # Adapt from https://github.com/OpenRLHF/OpenRLHF/blob/10c733694ed9fbb78a0a2ff6a05efc7401584d46/openrlhf/models/utils.py
 # and https://github.com/OpenRLHF/OpenRLHF/blob/10c733694ed9fbb78a0a2ff6a05efc7401584d46/openrlhf/trainer/ppo_utils/experience_maker.py
 
+import math
 from argparse import Namespace
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from miles.backends.training_utils.cp_utils import (
     slice_loss_masks_for_local_cp,
 )
 from miles.backends.training_utils.parallel import get_parallel_state
+from miles.utils.ft_utils.process_group_utils import MultiPGUtil
 
 _LOG_RATIO_EXP_CLAMP = 20.0
 
@@ -219,6 +221,84 @@ def compute_opsm_mask(
 
     opsm_mask = torch.cat(opsm_mask_list, dim=0)
     return opsm_mask, opsm_clipfrac
+
+
+def compute_steer_weight(
+    *,
+    log_probs: torch.Tensor,
+    ppo_kl: torch.Tensor,
+    advantages: torch.Tensor,
+    entropy: torch.Tensor,
+    clipfrac: torch.Tensor,
+    active_tokens: torch.Tensor,
+    lambda_min: float,
+) -> torch.Tensor:
+    """Compute STEER per-token weights from the estimated token-level entropy change.
+
+    Implements "Rethinking Entropy Interventions in RLVR: An Entropy Change Perspective"
+    (ACL 2026). The per-token entropy change after one update is estimated by Theorem 1:
+
+        omega = -(eta / L) * I_clip * A * r * pi * (1 - pi) * (log pi + H)
+
+    where `pi` is the current policy probability of the sampled token, `r = pi / pi_old`,
+    `H` is the full-distribution entropy at that position and `I_clip` is 0 when clipping
+    has zeroed the token's gradient. The leading `-(eta / L)` is a global constant and is
+    dropped here because it cancels in the normalization below.
+
+    Tokens are then weighted by an exponential decay of their normalized absolute entropy
+    change (Eq. 9), so the token moving entropy the most is attenuated the most:
+
+        lambda = exp(-alpha * |omega| / max|omega|),  alpha = -log(lambda_min)
+
+    The absolute value is intentional: large entropy *increases* are also destabilizing.
+
+    All inputs are flat, index-aligned `[sum C_i]` tensors of CP-local response tokens.
+
+    Args:
+        log_probs: Current policy log-probs of the sampled tokens.
+        ppo_kl: `old_log_probs - log_probs`, the negative log importance ratio.
+        advantages: Per-token advantages.
+        entropy: Per-token full-distribution entropy.
+        clipfrac: Clip indicator from `compute_policy_loss`; 1 where clipping applied.
+        active_tokens: Boolean mask of tokens that contribute to the loss.
+        lambda_min: Minimum attainable weight, attained at the batch-max `|omega|`.
+
+    Returns:
+        Flat per-token weights in `[lambda_min, 1]`, detached.
+    """
+    with torch.no_grad():
+        probs = log_probs.detach().float().exp()
+        ratio = _safe_exp_neg_ppo_kl(ppo_kl)
+        # `clipfrac` is 1 exactly where the clipped branch won the max, i.e. where the
+        # token's gradient is dead -- the paper's I_clip is its complement.
+        iclip = 1.0 - clipfrac.float()
+        omega = (
+            iclip
+            * advantages.float()
+            * ratio
+            * probs
+            * (1.0 - probs)
+            * (log_probs.detach().float() + entropy.detach().float())
+        )
+        omega = torch.where(active_tokens, torch.nan_to_num(omega, nan=0.0, posinf=0.0, neginf=0.0), omega.new_zeros(()))
+
+        abs_omega = omega.abs()
+        max_abs_omega = abs_omega.amax() if abs_omega.numel() > 0 else abs_omega.new_zeros(())
+        # The normalizer must be shared across ranks: under CP a single sequence is split
+        # across ranks, so a rank-local max would scale halves of the same sequence
+        # differently. Reduce over the same groups used to aggregate the loss itself.
+        parallel_state = get_parallel_state()
+        if dist.is_available() and dist.is_initialized() and parallel_state.effective_dp_cp.size > 1:
+            MultiPGUtil.all_reduce(
+                max_abs_omega,
+                parallel_state.effective_dp_cp.groups_inner_to_outer,
+                op=dist.ReduceOp.MAX,
+            )
+
+        # A group whose samples all earned the same reward has zero advantages, hence
+        # zero entropy change: the normalized ratio is 0 and STEER correctly does nothing.
+        alpha = -math.log(lambda_min)
+        return torch.exp(-alpha * abs_omega / torch.clamp_min(max_abs_omega, torch.finfo(abs_omega.dtype).tiny))
 
 
 def compute_gspo_kl(

@@ -1485,6 +1485,21 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=1e-4,
                 help="The threshold for Off-Policy Sequence Masking (OPSM).",
             )
+            parser.add_argument(
+                "--use-steer",
+                action="store_true",
+                default=False,
+                help="Whether to enable STEER (Stabilizing Token-level Entropy-changE via Reweighting), "
+                "which attenuates the policy-gradient term of tokens with the largest estimated "
+                "entropy change to mitigate entropy collapse.",
+            )
+            parser.add_argument(
+                "--steer-lambda-min",
+                type=float,
+                default=0.7,
+                help="The minimum STEER token weight, attained by the token with the largest absolute "
+                "estimated entropy change in the batch. Weights lie in [steer_lambda_min, 1].",
+            )
             return parser
 
         def add_on_policy_distillation_arguments(parser):
@@ -2923,6 +2938,11 @@ def miles_validate_args(args):
 
     if args.eps_clip_high is None:
         args.eps_clip_high = args.eps_clip
+
+    if args.use_steer:
+        assert (
+            0.0 < args.steer_lambda_min <= 1.0
+        ), f"steer_lambda_min must lie in (0, 1], but got {args.steer_lambda_min}."
 
     if args.eval_reward_key is None:
         args.eval_reward_key = args.reward_key
