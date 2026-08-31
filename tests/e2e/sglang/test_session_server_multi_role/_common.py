@@ -28,6 +28,8 @@ class ModelConfig:
     num_gpus: int = 4
     tp_size: int = 1
     context_length: int | None = None
+    kv_cache_dtype: str | None = None
+    mamba_full_memory_ratio: float | None = None
     rollout_max_response_len: int = SESSION_VERIFY_INVARIANT_ARGS["rollout_max_response_len"]
     cuda_graph_backend_prefill: str | None = None
     # sglang expert-parallel size.  MoE archs like DeepSeek V4 hit a fused-moe
@@ -64,6 +66,8 @@ def run_one(
     invariants["sglang_cuda_graph_backend_prefill"] = cfg.cuda_graph_backend_prefill
     invariants["sglang_ep_size"] = cfg.ep_size
     invariants["sglang_context_length"] = cfg.context_length
+    invariants["sglang_kv_cache_dtype"] = cfg.kv_cache_dtype
+    invariants["sglang_mamba_full_memory_ratio"] = cfg.mamba_full_memory_ratio
     invariants["enable_spec"] = cfg.enable_spec
     args = argparse.Namespace(
         hf_checkpoint=cfg.model_name,
