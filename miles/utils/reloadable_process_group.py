@@ -261,6 +261,30 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
         self.group.bound_device_id = dev
 
 
+def _forward_remaining_collectives():
+    """Forward ProcessGroup collectives not explicitly implemented above."""
+    skip = {"rank", "size", "name", "abort", "shutdown", "bound_device_id"}
+    for name in dir(dist.ProcessGroup):
+        if name.startswith("__") or name in skip:
+            continue
+        if name in vars(ReloadableProcessGroup):
+            continue
+        if not callable(getattr(dist.ProcessGroup, name, None)):
+            continue
+
+        def make(method):
+            def forward(self, *args, **kwargs):
+                return self._fwd(method, *args, **kwargs)
+
+            forward.__name__ = method
+            return forward
+
+        setattr(ReloadableProcessGroup, name, make(name))
+
+
+_forward_remaining_collectives()
+
+
 def destroy_process_groups():
     """Destroy all reloadable process groups."""
     ReloadableProcessGroup.destroy_process_groups()
