@@ -15,6 +15,8 @@ from miles.utils.lora import is_lora_enabled, lora_rollout_enabled  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+_DISTRIBUTED_OPTIMIZER_STATE_MARKER = "distributed_optimizer_state.complete"
+
 # ---------------------------------------------------------------------------
 # Unified HF <-> Megatron module name mappings
 # ---------------------------------------------------------------------------
@@ -406,6 +408,41 @@ def create_lora_instance(args: Namespace):
 # ---------------------------------------------------------------------------
 
 
+def _uses_separate_distributed_optimizer_state(optimizer: Any | None) -> bool:
+    """Return whether optimizer tensors must be checkpointed separately."""
+    if optimizer is None or getattr(optimizer, "is_stub_optimizer", False):
+        return False
+
+    chained_optimizers = getattr(optimizer, "chained_optimizers", None)
+    if chained_optimizers is not None:
+        return any(
+            _uses_separate_distributed_optimizer_state(child)
+            for child in chained_optimizers
+        )
+
+    return callable(getattr(optimizer, "get_parameter_state_dp_zero", None)) and callable(
+        getattr(optimizer, "load_parameter_state_from_dp_zero", None)
+    )
+
+
+def _distributed_optimizer_state_path(adapter_dir: Path) -> Path:
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    return adapter_dir / f"distributed_optimizer_state_rank{rank}.pt"
+
+
+def _reset_optimizer_tensor_state(optimizer: Any) -> None:
+    chained_optimizers = getattr(optimizer, "chained_optimizers", None)
+    if chained_optimizers is not None:
+        for child in chained_optimizers:
+            _reset_optimizer_tensor_state(child)
+        return
+
+    inner_optimizer = getattr(optimizer, "optimizer", None)
+    state = getattr(inner_optimizer, "state", None)
+    if state is not None:
+        state.clear()
+
+
 def save_lora_checkpoint(
     model: Sequence[torch.nn.Module],
     args: Namespace,
@@ -515,6 +552,15 @@ def save_lora_checkpoint(
         )
         logger.info(f"Saved optimizer/scheduler state to {save_path}")
 
+        if _uses_separate_distributed_optimizer_state(optimizer):
+            parameter_state_path = _distributed_optimizer_state_path(save_path)
+            optimizer.save_parameter_state(str(parameter_state_path))
+            if dist.is_initialized():
+                dist.barrier()
+            if rank == 0:
+                (save_path / _DISTRIBUTED_OPTIMIZER_STATE_MARKER).touch()
+            logger.info("Saved distributed optimizer parameter state to LoRA checkpoint")
+
     if dist.is_initialized():
         dist.barrier()
 
@@ -576,6 +622,12 @@ def load_lora_adapter(
         logger.info(f"Loaded {loaded} adapter tensors from Megatron-native checkpoint: {native_path}")
 
         iteration = _load_training_state(adapter_dir, optimizer, opt_param_scheduler)
+
+        # Adapter weights were restored after the optimizer created its FP32
+        # master parameters. Refresh those copies before the first resumed step.
+        if optimizer is not None:
+            optimizer.reload_model_params()
+            logger.info("Refreshed optimizer main params from the restored LoRA adapter")
         return True, iteration
 
     # ---- HF PEFT format (future work) ----
@@ -610,8 +662,22 @@ def _load_training_state(
     # param group metadata), so full unpickling is required here.
     training_state = torch.load(state_path, map_location="cpu", weights_only=False)
 
-    optimizer.load_state_dict(training_state["optimizer"])
-    logger.info("Restored optimizer state from LoRA checkpoint")
+    uses_separate_parameter_state = _uses_separate_distributed_optimizer_state(optimizer)
+    marker_path = adapter_dir / _DISTRIBUTED_OPTIMIZER_STATE_MARKER
+    if uses_separate_parameter_state and not marker_path.exists():
+        _reset_optimizer_tensor_state(optimizer)
+        logger.warning(
+            "LoRA checkpoint has no distributed optimizer parameter state; "
+            "resetting optimizer tensor state for a safe legacy resume"
+        )
+    else:
+        optimizer.load_state_dict(training_state["optimizer"])
+        if uses_separate_parameter_state:
+            parameter_state_path = _distributed_optimizer_state_path(adapter_dir)
+            optimizer.load_parameter_state(str(parameter_state_path))
+            logger.info("Restored distributed optimizer parameter state from LoRA checkpoint")
+        else:
+            logger.info("Restored optimizer state from LoRA checkpoint")
 
     if opt_param_scheduler is not None and training_state.get("opt_param_scheduler") is not None:
         opt_param_scheduler.load_state_dict(training_state["opt_param_scheduler"])

@@ -195,8 +195,8 @@ def test_allgather_cp_response_rows_keep_global_response_indices(monkeypatch, cp
 @pytest.mark.parametrize(
     ("cp_rank", "expected_logits", "expected_tokens", "expected_indices"),
     [
-        (0, [[3.0], [101.0], [102.0], [103.0]], [[4], [12, 13, 14]], [[0], [0, 1, 2]]),
-        (1, [[0.0], [1.0], [2.0], [100.0]], [[5, 6, 7], [15]], [[1, 2, 3], [3]]),
+        (0, [[[3.0]], [[101.0], [102.0], [103.0]]], [[4], [12, 13, 14]], [[0], [0, 1, 2]]),
+        (1, [[[0.0], [1.0], [2.0]], [[100.0]]], [[5, 6, 7], [15]], [[1, 2, 3], [3]]),
     ],
 )
 def test_allgather_cp_bshd_indexes_each_sample_independently(

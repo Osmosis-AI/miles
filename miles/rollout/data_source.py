@@ -140,12 +140,18 @@ class RolloutDataSource(DataSource):
         if not self.args.rollout_global_dataset:
             return
 
-        if self.args.load is None:
+        relative_path = f"rollout/global_dataset_state_dict_{rollout_id}.pt"
+        checkpoint_roots = [root for root in (self.args.load, self.args.save) if root is not None]
+        if not checkpoint_roots:
             return
 
-        path = os.path.join(self.args.load, f"rollout/global_dataset_state_dict_{rollout_id}.pt")
+        candidate_paths = [os.path.join(root, relative_path) for root in checkpoint_roots]
+        path = next((candidate for candidate in candidate_paths if os.path.exists(candidate)), candidate_paths[0])
         if not os.path.exists(path):
-            logger.info(f"Checkpoint {path} does not exist.")
+            logger.info(
+                "Rollout dataset checkpoint does not exist in any configured root: "
+                f"{candidate_paths}"
+            )
             return
 
         logger.info(f"load metadata from {path}")
