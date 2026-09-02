@@ -55,6 +55,7 @@ def _iter_response_chunks(
         logits = logits.squeeze(0)
     else:
         assert max_seq_lens is not None
+        bshd_local_seq_len = logits.size(1)
         logits = logits.view(-1, logits.size(-1))
 
     if args.true_on_policy_mode:
@@ -86,16 +87,24 @@ def _iter_response_chunks(
             tokens_chunk = tokens[-response_length:] if response_length else tokens[0:0]
             response_indices = range(response_length) if include_response_indices else ()
         elif args.allgather_cp:
-            # DSA: global concat then contiguous CP split. Each rank owns logits for
-            # global positions [chunk_start, chunk_end).
-            logits_local_len = logits.size(0)
+            # DSA uses a contiguous CP split. THD packs all samples into one
+            # global stream, while BSHD splits each padded sample independently.
             cp_rank = parallel_state.cp.rank
+            if qkv_format == "bshd":
+                logits_local_len = bshd_local_seq_len
+                logits_sample_start = i * logits_local_len
+                sample_seq_start = 0
+            else:
+                logits_local_len = logits.size(0)
+                logits_sample_start = 0
+                sample_seq_start = seq_start
+
             chunk_start = cp_rank * logits_local_len
             chunk_end = chunk_start + logits_local_len
 
             prompt_length = total_length - response_length
-            resp_token_start = seq_start + prompt_length
-            resp_token_end = seq_start + total_length
+            resp_token_start = sample_seq_start + prompt_length
+            resp_token_end = sample_seq_start + total_length
             logit_global_start = resp_token_start - 1
             logit_global_end = resp_token_end - 1
 
@@ -106,8 +115,10 @@ def _iter_response_chunks(
                 tokens_chunk = tokens[0:0]
                 response_indices = ()
             else:
-                logits_chunk = logits[s - chunk_start : e - chunk_start]
-                tokens_chunk = tokens[(s + 1) - seq_start : (e + 1) - seq_start]
+                logits_chunk = logits[
+                    logits_sample_start + s - chunk_start : logits_sample_start + e - chunk_start
+                ]
+                tokens_chunk = tokens[(s + 1) - sample_seq_start : (e + 1) - sample_seq_start]
                 response_indices = (
                     range(
                         s - logit_global_start,

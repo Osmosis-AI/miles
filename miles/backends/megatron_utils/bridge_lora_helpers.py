@@ -191,6 +191,12 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
         hidden_size = hf_config.text_config.hidden_size if hasattr(hf_config, "text_config") else hf_config.hidden_size
         provider.register_pre_wrap_hook(_make_value_model_hook(hidden_size))
 
+    # Local import avoids the model.py -> bridge_lora_helpers.py cycle. Keep
+    # this as the final hook so it wraps any forward installed by earlier hooks.
+    from miles.backends.megatron_utils.model_provider import _wrap_bridge_forward_primary_output
+
+    provider.register_pre_wrap_hook(_wrap_bridge_forward_primary_output)
+
     use_distributed_optimizer = "muon" not in (args.optimizer or "").lower()
     if is_multi_lora_enabled(args):
         # Per-slot LayerWise optimizers: plain DDP all-reduce keeps full grads on

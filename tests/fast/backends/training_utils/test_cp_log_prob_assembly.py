@@ -1,8 +1,11 @@
 """`assemble_log_prob_from_cp` must invert the CP split exactly."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from miles.backends.training_utils import cp_utils
 from miles.backends.training_utils.cp_utils import assemble_log_prob_from_cp, get_logits_and_tokens_offset_with_cp
 
 
@@ -57,3 +60,36 @@ def test_partial_group_is_rejected():
     del chunks[2]
     with pytest.raises(AssertionError, match="missing"):
         assemble_log_prob_from_cp(chunks, 640, 512, 4)
+
+
+def test_allgather_cp_redistribute_bshd_indexes_each_sample_independently(monkeypatch):
+    parallel_state = SimpleNamespace(cp=SimpleNamespace(rank=0, size=2, group=object()))
+    monkeypatch.setattr(cp_utils, "get_parallel_state", lambda: parallel_state)
+    gathered_inputs = []
+
+    def fake_all_reduce(tensor, group):
+        assert group is parallel_state.cp.group
+        gathered_inputs.append(tensor.detach().clone())
+        return tensor
+
+    monkeypatch.setattr(cp_utils.dist.nn, "all_reduce", fake_all_reduce)
+    res = {
+        "log_probs": [
+            torch.tensor([10.0], requires_grad=True),
+            torch.tensor([20.0, 21.0, 22.0], requires_grad=True),
+        ]
+    }
+
+    cp_utils.allgather_cp_redistribute(
+        res,
+        logits=torch.zeros(2, 4, 1),
+        args=SimpleNamespace(qkv_format="bshd"),
+        total_lengths=[8, 6],
+        response_lengths=[4, 4],
+        max_seq_lens=[8, 8],
+    )
+
+    torch.testing.assert_close(
+        gathered_inputs[0],
+        torch.tensor([10.0, 0.0, 0.0, 0.0, 20.0, 21.0, 22.0, 0.0]),
+    )

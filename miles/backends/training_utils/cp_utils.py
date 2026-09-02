@@ -368,8 +368,9 @@ def allgather_cp_redistribute(
         seq_start = 0
         for value, total_length, response_length in zip(values, total_lengths, response_lengths, strict=False):
             prompt_length = total_length - response_length
-            logit_global_start = seq_start + prompt_length - 1
-            logit_global_end = seq_start + total_length - 1
+            sample_seq_start = 0 if args.qkv_format == "bshd" else seq_start
+            logit_global_start = sample_seq_start + prompt_length - 1
+            logit_global_end = sample_seq_start + total_length - 1
 
             s = max(logit_global_start, chunk_start)
             e = min(logit_global_end, chunk_end)

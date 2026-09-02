@@ -192,6 +192,48 @@ def test_allgather_cp_response_rows_keep_global_response_indices(monkeypatch, cp
     assert logits_chunk.size(0) == len(expected_indices)
 
 
+@pytest.mark.parametrize(
+    ("cp_rank", "expected_logits", "expected_tokens", "expected_indices"),
+    [
+        (0, [[3.0], [101.0], [102.0], [103.0]], [[4], [12, 13, 14]], [[0], [0, 1, 2]]),
+        (1, [[0.0], [1.0], [2.0], [100.0]], [[5, 6, 7], [15]], [[1, 2, 3], [3]]),
+    ],
+)
+def test_allgather_cp_bshd_indexes_each_sample_independently(
+    monkeypatch, cp_rank, expected_logits, expected_tokens, expected_indices
+):
+    parallel_state = SimpleNamespace(cp=SimpleNamespace(rank=cp_rank, size=2))
+    monkeypatch.setattr(logit_processors, "get_parallel_state", lambda: parallel_state)
+    args = SimpleNamespace(
+        qkv_format="bshd",
+        rollout_temperature=1.0,
+        true_on_policy_mode=False,
+        allgather_cp=True,
+    )
+    logits = torch.tensor(
+        [
+            [[0.0], [1.0], [2.0], [3.0]],
+            [[100.0], [101.0], [102.0], [103.0]],
+        ]
+    )
+
+    response_chunks = list(
+        logit_processors._iter_response_chunks(
+            logits,
+            args=args,
+            unconcat_tokens=[torch.arange(8), torch.arange(10, 16)],
+            total_lengths=[8, 6],
+            response_lengths=[4, 4],
+            max_seq_lens=[8, 8],
+            include_response_indices=True,
+        )
+    )
+
+    assert [chunk[0].tolist() for chunk in response_chunks] == expected_logits
+    assert [chunk[1].tolist() for chunk in response_chunks] == expected_tokens
+    assert [list(chunk[2]) for chunk in response_chunks] == expected_indices
+
+
 @pytest.mark.parametrize(("cp_rank", "expected_indices"), [(0, [4]), (1, [0, 1, 2, 3])])
 def test_zigzag_cp_response_rows_keep_global_response_indices(monkeypatch, cp_rank, expected_indices):
     parallel_state = SimpleNamespace(cp=SimpleNamespace(rank=cp_rank, size=2))

@@ -3,6 +3,7 @@ import argparse
 import inspect
 import logging
 from contextlib import nullcontext
+from functools import wraps
 from typing import Literal
 
 import torch
@@ -22,6 +23,23 @@ from miles.utils.misc import load_function
 from miles.utils.replay_base import routing_replay_manager
 
 logger = logging.getLogger(__name__)
+
+
+def _wrap_bridge_forward_primary_output(model_or_chunks):
+    """Normalize Megatron-Bridge forward outputs to their primary tensor."""
+    model_chunks = model_or_chunks if isinstance(model_or_chunks, list) else [model_or_chunks]
+
+    for model_chunk in model_chunks:
+        bridge_forward = model_chunk.forward
+
+        @wraps(bridge_forward)
+        def primary_output_forward(*args, _bridge_forward=bridge_forward, **kwargs):
+            output = _bridge_forward(*args, **kwargs)
+            return output[0] if isinstance(output, tuple) else output
+
+        model_chunk.forward = primary_output_forward
+
+    return model_or_chunks
 
 
 def _apply_bridge_runtime_config(provider, args: argparse.Namespace) -> None:
@@ -190,15 +208,9 @@ def get_model_provider_func(
                     input_size=model.config.hidden_size, output_size=1, config=model.config
                 )
             assert not getattr(args, "enable_witness", False), "Witness is not supported yet in this mode"
-            # Gemma-4 forward returns (logits, loss_mask); keep logits only.
-            _bridge_forward = model.forward
-
-            def _logits_only_forward(*args, **kwargs):
-                out = _bridge_forward(*args, **kwargs)
-                return out[0] if isinstance(out, tuple) else out
-
-            model.forward = _logits_only_forward
-            return model
+            # Some bridge models return (logits, auxiliary_output); training
+            # loss code consumes the logits tensor only.
+            return _wrap_bridge_forward_primary_output(model)
 
         return wrapped_bridge_provider
 
