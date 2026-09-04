@@ -469,11 +469,46 @@ class TestMergeTokensBoundary:
         result = qwen3_tito.merge_tokens(_BND_OLD, _BND_NEW, [100, 200, im_end], _BND_TOOLS)
         assert result == [100, 200, im_end, nl] + incremental
 
-    def test_qwen3_no_newline_otherwise(self, qwen3_tito: Qwen3TITOTokenizer):
-        """No insertion when prefix does not end with <|im_end|>."""
+    def test_qwen3_closes_truncated_turn(self, qwen3_tito: Qwen3TITOTokenizer):
+        """A length-limited response still needs a boundary before observations."""
         incremental = qwen3_tito.tokenize_additional_messages(_BND_OLD, _BND_NEW, _BND_TOOLS)
         result = qwen3_tito.merge_tokens(_BND_OLD, _BND_NEW, [100, 200, 300], _BND_TOOLS)
-        assert result == [100, 200, 300] + incremental
+        assert result == [100, 200, 300, qwen3_tito._im_end_id, qwen3_tito._newline_id] + incremental
+
+    @pytest.mark.parametrize(
+        "model_id,tito_type",
+        [
+            ("Qwen/Qwen3-4B", TITOTokenizerType.QWEN3),
+            ("Qwen/Qwen3.8-27B", TITOTokenizerType.QWEN38_SMALL),
+        ],
+    )
+    @pytest.mark.parametrize("appended_role", ["user", "tool"])
+    @pytest.mark.parametrize("ended_with_newline", [False, True])
+    def test_qwen_truncated_turn_preserves_template_structure(
+        self, model_id, tito_type, appended_role, ended_with_newline
+    ):
+        tokenizer = _get_tokenizer(model_id, tito_type)
+        tito = get_tito_tokenizer(tokenizer, tito_type)
+        old = [
+            {"role": "system", "content": "Use the tools."},
+            {"role": "user", "content": "Finish the task."},
+            {"role": "assistant", "content": "Unfinished response" + ("\n" if ended_with_newline else "")},
+        ]
+        new = old + [{"role": appended_role, "content": "The response was cut off. Continue."}]
+        canonical_prefix = tito.apply_chat_template(old, add_generation_prompt=False, tokenize=True)
+        assert canonical_prefix[-2:] == [tito._im_end_id, tito._newline_id]
+        generated_prefix = canonical_prefix[:-2]
+
+        merged = tito.merge_tokens(old, new, generated_prefix)
+        expected = tito.apply_chat_template(new, add_generation_prompt=True, tokenize=True)
+
+        assert merged[: len(generated_prefix)] == generated_prefix
+        assert not tito.create_comparator().compare_sequences(expected, merged)
+
+    def test_qwen3_keeps_complete_boundary(self, qwen3_tito: Qwen3TITOTokenizer):
+        prefix = [100, 200, qwen3_tito._im_end_id, qwen3_tito._newline_id]
+        incremental = qwen3_tito.tokenize_additional_messages(_BND_OLD, _BND_NEW, _BND_TOOLS)
+        assert qwen3_tito.merge_tokens(_BND_OLD, _BND_NEW, prefix, _BND_TOOLS) == prefix + incremental
 
     # -- GLM47: strip ambiguous boundary tokens --
 

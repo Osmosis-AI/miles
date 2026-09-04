@@ -238,12 +238,13 @@ class TITOTokenizer:
 
 
 class Qwen3TITOTokenizer(TITOTokenizer):
-    """Qwen3 variant: handles missing newline at the boundary.
+    """Qwen3 variant: completes the boundary after a generated turn.
 
     The Qwen3 chat template emits ``<|im_end|>\\n`` after every message, but
     the model stops at ``<|im_end|>`` without generating the trailing ``\\n``.
-    ``merge_tokens`` inserts the missing newline so that the pretokenized
-    prefix matches the canonical template output.
+    Length-limited responses can also lack ``<|im_end|>``. ``merge_tokens``
+    appends the missing boundary before observations without changing any
+    generated token IDs; the added tokens belong to the next prompt.
     """
 
     reasoning_parser = "qwen3"
@@ -282,7 +283,9 @@ class Qwen3TITOTokenizer(TITOTokenizer):
     ) -> list[int]:
         incremental = self.tokenize_additional_messages(old_messages, new_messages, tools)
         prefix = list(pretokenized_token_ids)
-        if prefix and prefix[-1] == self._im_end_id:
+        if prefix and prefix[-2:] != [self._im_end_id, self._newline_id]:
+            if prefix[-1] != self._im_end_id:
+                prefix.append(self._im_end_id)
             prefix.append(self._newline_id)
         return prefix + incremental
 
