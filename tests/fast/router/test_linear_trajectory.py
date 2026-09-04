@@ -97,6 +97,19 @@ def registry_with_assistant():
     return _make_registry(frozenset({"tool", "user", "assistant"}))
 
 
+def test_registry_applies_configured_rollback_limit():
+    args = SimpleNamespace(session_max_assistant_rollback_steps=256)
+    mock_tito = _MockTITOTokenizer(
+        tokenizer=None,
+        assistant_start_str="<|im_start|>assistant",
+    )
+    registry = SessionRegistry(args, tokenizer=None, tito_tokenizer=mock_tito)
+
+    session = registry.get_session(registry.create_session())
+
+    assert session.max_assistant_rollback_steps == 256
+
+
 class TestSessionCRUD:
     def test_create_session(self, registry: SessionRegistry):
         session_id = registry.create_session()
@@ -517,8 +530,8 @@ class TestRollback:
         assert session.token_ids == [1, 2, 3, 10, 11]
         assert session.messages == [SYS_MSG, USER_MSG, ASSISTANT_MSG_1]
 
-    def test_multi_step_rollback_raises(self, registry: SessionRegistry):
-        """Rollback that discards >1 assistant raises MessageValidationError and leaves state unchanged."""
+    def test_configured_rollback_limit_raises(self, registry: SessionRegistry):
+        """Rollback beyond the configured bound leaves state unchanged."""
         sid = registry.create_session()
         session = registry.get_session(sid)
 
@@ -556,6 +569,88 @@ class TestRollback:
         assert session.trajectory_token_ids == prev_token_ids
         assert session.records == prev_records
         assert session.num_assistant == prev_num_assistant
+
+    def test_long_context_compaction_discards_177_assistants(self, registry: SessionRegistry):
+        """A long Claude Code session can compact many generated checkpoints."""
+        sid = registry.create_session()
+        session = registry.get_session(sid)
+        session.max_assistant_rollback_steps = 256
+        messages = [SYS_MSG, USER_MSG]
+        checkpoint_ends = []
+        for turn in range(179):
+            messages.append({"role": "assistant", "content": f"assistant {turn}"})
+            checkpoint_ends.append(len(messages))
+            if turn < 178:
+                messages.append(
+                    {"role": "tool", "content": f'{{"turn": {turn}}}', "tool_call_id": f"call_{turn}"}
+                )
+
+        session.messages = messages
+        session.trajectory_token_ids = [[turn] for turn in range(179)]
+        session.generated_checkpoint_message_ends = checkpoint_ends
+        session.records = [MagicMock(spec=SessionRecord) for _ in range(179)]
+        session.num_assistant = 179
+
+        compacted_tool = {"role": "tool", "content": '{"compacted": true}', "tool_call_id": "compact"}
+        result = session.prepare_pretokenized(
+            messages[:5] + [compacted_tool],
+            tito_tokenizer=registry.tito_tokenizer,
+        )
+
+        assert result == [1]
+        assert session.messages == messages[:5]
+        assert session.trajectory_token_ids == [[0], [1]]
+        assert session.generated_checkpoint_message_ends == [3, 5]
+        assert len(session.records) == 2
+        assert session.num_assistant == 2
+
+    def test_multi_step_rollback_to_empty_then_continue(self, registry: SessionRegistry):
+        """A bounded context reset can discard several checkpoints and continue."""
+        sid = registry.create_session()
+        session = registry.get_session(sid)
+        session.max_assistant_rollback_steps = 256
+
+        turn1 = [USER_MSG]
+        session.update_pretokenized_state(turn1, ASSISTANT_MSG_1, [1, 2], [10], max_trim_tokens=0)
+
+        turn2 = [USER_MSG, ASSISTANT_MSG_1, TOOL_MSG_1]
+        session.prepare_pretokenized(turn2, tito_tokenizer=registry.tito_tokenizer)
+        session.update_pretokenized_state(turn2, ASSISTANT_MSG_2, [1, 2, 10, 20], [30], max_trim_tokens=0)
+
+        turn3 = [USER_MSG, ASSISTANT_MSG_1, TOOL_MSG_1, ASSISTANT_MSG_2, TOOL_MSG_2]
+        session.prepare_pretokenized(turn3, tito_tokenizer=registry.tito_tokenizer)
+        session.update_pretokenized_state(
+            turn3,
+            ASSISTANT_MSG_FINAL,
+            [1, 2, 10, 20, 30, 40],
+            [50],
+            max_trim_tokens=0,
+        )
+
+        compacted_turn = [{"role": "user", "content": "Continue from the compacted context."}]
+        assert (
+            session.prepare_pretokenized(
+                compacted_turn,
+                tito_tokenizer=registry.tito_tokenizer,
+            )
+            == _MOCK_FIRST_TURN_TOKENS
+        )
+        assert session.messages == []
+        assert session.trajectory_token_ids == []
+        assert session.generated_checkpoint_message_ends == []
+        assert session.records == []
+        assert session.num_assistant == 0
+
+        session.update_pretokenized_state(
+            compacted_turn,
+            ASSISTANT_MSG_FINAL,
+            [7],
+            [8],
+            max_trim_tokens=0,
+        )
+        assert session.messages == [*compacted_turn, ASSISTANT_MSG_FINAL]
+        assert session.token_ids == [7, 8]
+        assert session.num_assistant == 1
 
     def test_rollback_then_continue_full_trajectory(self, registry: SessionRegistry):
         """Rollback and then complete a full new trajectory from the checkpoint."""
@@ -701,7 +796,7 @@ class TestRollback:
         assert session.messages == [USER_MSG, ASSISTANT_MSG_FINAL]
 
     def test_rollback_to_empty_beyond_one_assistant_raises(self, registry: SessionRegistry):
-        """Resetting to empty is still bounded by MAX_ASSISTANT_ROLLBACK_STEPS."""
+        """Resetting to empty is still bounded by the configured rollback limit."""
         sid = registry.create_session()
         session = registry.get_session(sid)
 

@@ -2601,6 +2601,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--session-max-assistant-rollback-steps",
+                type=int,
+                default=1,
+                help=(
+                    "Maximum generated assistant checkpoints a v1 session may "
+                    "discard during a retry or context compaction. Keep the "
+                    "default for ordinary harnesses; raise it only for clients "
+                    "that intentionally rewrite long histories."
+                ),
+            )
+            parser.add_argument(
                 "--session-sample-picker-path",
                 type=str,
                 default="miles.rollout.session.v2.picker_hub.drop_retries",

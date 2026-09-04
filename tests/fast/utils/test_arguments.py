@@ -421,6 +421,14 @@ class TestSessionMessageMatcherArgument:
 
         assert args.session_message_matcher == selector
 
+    def test_session_rollback_limit_defaults_to_one(self):
+        assert self._parse([]).session_max_assistant_rollback_steps == 1
+
+    def test_session_rollback_limit_is_configurable(self):
+        args = self._parse(["--session-max-assistant-rollback-steps", "256"])
+
+        assert args.session_max_assistant_rollback_steps == 256
+
 
 class TestSessionServerPauseGenerationMode:
     def _parse(self, extra):

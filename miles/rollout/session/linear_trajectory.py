@@ -16,8 +16,6 @@ from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizer
 logger = logging.getLogger(__name__)
 
 
-# TODO: hardcoded to 1 for now; if multi-step rollback is actually needed,
-#  raise this limit or make it configurable and remove the restriction.
 MAX_ASSISTANT_ROLLBACK_STEPS = 1
 
 
@@ -64,14 +62,15 @@ class LinearTrajectory:
     Rollback uses ``generated_checkpoint_message_ends`` instead of inferring checkpoints from message roles.
 
     The typical message sequence is: [system?, user, assistant, tool, assistant, tool, …],
-    but the agent may retry from an earlier point (e.g. re-running a tool call),
-    in which case the session is rolled back at most one assistant step.
+    but the agent may retry from an earlier point or compact a long context, in
+    which case the session rolls back to a bounded earlier checkpoint.
 
     Concurrency contract: all mutating methods must be called under ``self.lock``.
     """
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
     closing: bool = field(default=False, repr=False, compare=False)
+    max_assistant_rollback_steps: int = MAX_ASSISTANT_ROLLBACK_STEPS
     messages: list[dict[str, Any]] = field(default_factory=list)
     records: list[SessionRecord] = field(default_factory=list)
     trajectory_token_ids: list[list[int]] = field(default_factory=list)
@@ -97,19 +96,19 @@ class LinearTrajectory:
         """Build the full prompt input_ids for *request_messages*.
 
         Validates that *request_messages* extends the stored history under
-        *message_matcher* (defaults to the strict matcher), rolling back at
-        most one assistant step on agent retries, then reuses the stored
-        token_ids as the pretokenized prefix.  When no stored checkpoint
-        is left to build on — the first turn, or a retry of the first turn that
-        rolled the session back to empty — renders *request_messages* from
-        scratch via the chat template instead.
+        *message_matcher* (defaults to the strict matcher), rolling back to a
+        bounded earlier checkpoint on retries or context compaction, then
+        reuses the stored token_ids as the pretokenized prefix. When no stored
+        checkpoint is left to build on — the first turn, or a retry of the
+        first turn that rolled the session back to empty — renders
+        *request_messages* from scratch via the chat template instead.
 
         Must be called under ``self.lock``.
         """
         matcher = message_matcher if message_matcher is not None else strict_message_matches
 
-        # 1. Detect agent retries and roll back (at most one assistant step). Retrying the
-        #    first turn rolls back to the empty checkpoint, clearing token_ids.
+        # 1. Detect retries or context compaction and roll back to a bounded
+        #    earlier checkpoint. Retrying the first turn clears token_ids.
         self._try_detect_and_rollback_to_assistant_checkpoint(request_messages, matcher)
 
         if not self.token_ids:
@@ -188,15 +187,10 @@ class LinearTrajectory:
         or to the empty checkpoint when the matching prefix holds no generated
         checkpoint at all.
 
-        Only a single-step rollback is allowed (controlled by
-        ``MAX_ASSISTANT_ROLLBACK_STEPS``).  Discarding exactly one generated
-        checkpoint means the agent is retrying from the preceding checkpoint —
-        the request shares the stored prefix up to that generated response and
-        then continues with whatever the agent chooses (same or different tool
-        result, additional messages, etc.).  Any request that would need to
-        discard more than one generated checkpoint (i.e. jump back across
-        multiple turns) is rejected with ``MessageValidationError`` and no
-        state is modified.
+        Rollback is bounded by ``max_assistant_rollback_steps``. This covers a
+        nearby retry as well as a harness compacting a long context into a
+        summary. A request that exceeds the bound is rejected with
+        ``MessageValidationError`` and no state is modified.
 
         Example — agent retries after the first tool call::
 
@@ -209,7 +203,7 @@ class LinearTrajectory:
 
             match_len = 3  (sys, user, assistant₁ all match)
             Last generated checkpoint in matched prefix → assistant₁ (checkpoint 0)
-            discard_count = 2 - 1 = 1  (≤ MAX_ASSISTANT_ROLLBACK_STEPS)
+            discard_count = 2 - 1 = 1  (within the configured bound)
 
             After rollback:
               messages           = [sys, user, assistant₁]
@@ -225,7 +219,7 @@ class LinearTrajectory:
 
             match_len = 1  (user matches), no generated checkpoint in the matched prefix
             Rollback target → the empty checkpoint (index -1)
-            discard_count = 1 - 0 = 1  (≤ MAX_ASSISTANT_ROLLBACK_STEPS)
+            discard_count = 1 - 0 = 1  (within the configured bound)
 
             After rollback the session is empty and the caller re-renders the
             prompt from scratch, so turn 1 regenerates like any later turn.
@@ -261,10 +255,10 @@ class LinearTrajectory:
         # first turn, so roll back to the empty checkpoint and retain no messages.
         rollback_msg_end = self.generated_checkpoint_message_ends[checkpoint_index] if checkpoint_index >= 0 else 0
         discard_count = self.num_assistant - (checkpoint_index + 1)
-        if discard_count > MAX_ASSISTANT_ROLLBACK_STEPS:
+        if discard_count > self.max_assistant_rollback_steps:
             raise MessageValidationError(
                 f"rollback failed: discard_count={discard_count} exceeds "
-                f"max_assistant_rollback_steps={MAX_ASSISTANT_ROLLBACK_STEPS} "
+                f"max_assistant_rollback_steps={self.max_assistant_rollback_steps} "
                 f"(stored has {len(stored)} messages, "
                 f"request has {len(request_messages)} messages)"
             )
@@ -307,13 +301,24 @@ class SessionRegistry:
         self.tokenizer = tokenizer
         self.tito_tokenizer = tito_tokenizer
         self.comparator = tito_tokenizer.create_comparator()
+        self.max_assistant_rollback_steps = int(
+            getattr(
+                args,
+                "session_max_assistant_rollback_steps",
+                MAX_ASSISTANT_ROLLBACK_STEPS,
+            )
+        )
+        if self.max_assistant_rollback_steps < 1:
+            raise ValueError("session_max_assistant_rollback_steps must be positive")
         self.message_matcher: SessionMessageMatcher = (
             message_matcher if message_matcher is not None else strict_message_matches
         )
 
     def create_session(self) -> str:
         session_id = uuid.uuid4().hex
-        self.sessions[session_id] = LinearTrajectory()
+        self.sessions[session_id] = LinearTrajectory(
+            max_assistant_rollback_steps=self.max_assistant_rollback_steps
+        )
         return session_id
 
     def get_session(self, session_id: str) -> LinearTrajectory:
