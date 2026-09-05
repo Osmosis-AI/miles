@@ -99,12 +99,14 @@ class TrainRayActor(RayActor):
             args.distributed_backend = DET_NCCL_BACKEND_NAME
             logger.info("Deterministic collectives: training world uses the det_nccl backend")
 
-        # Use hybrid backend when FSDP CPU offload is enabled with a CPU backend
+        # A CPU backend keeps checkpoint metadata off the CUDA collective path.
         backend = args.distributed_backend
+        cpu_backend = getattr(args, "distributed_cpu_backend", None)
         if getattr(args, "fsdp_cpu_offload", False) and getattr(args, "fsdp_cpu_backend", None):
             cpu_backend = args.fsdp_cpu_backend
+        if cpu_backend:
             backend = f"cpu:{cpu_backend},cuda:{args.distributed_backend}"
-            logger.info(f"FSDP CPU offload enabled, using hybrid backend: {backend}")
+            logger.info("Training world uses hybrid backend: %s", backend)
 
         dist.init_process_group(
             backend=backend,

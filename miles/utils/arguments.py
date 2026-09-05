@@ -289,6 +289,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
 
         def add_train_arguments(parser):
             parser.add_argument(
+                "--distributed-cpu-backend",
+                choices=["gloo"],
+                default=None,
+                help="Optional CPU backend for the training world; routes object collectives over CPU.",
+            )
+            parser.add_argument(
                 "--train-backend",
                 type=str,
                 choices=["megatron", "fsdp"],
