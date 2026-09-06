@@ -12,15 +12,17 @@ from miles.backends.sglang_utils.arguments import validate_args as sglang_valida
 from miles.dashboard.args import add_dashboard_arguments, validate_dashboard_args
 from miles.rollout.checkpoint_eval import is_checkpoint_eval_fn
 from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizerType
-from miles.utils.environ import enable_experimental_ft_trainer, enable_experimental_rollout_refactor
+from miles.utils.environ import use_legacy_rollout_v1
 from miles.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
+from miles.utils.file_arg_utils import resolve_file_arg
 from miles.utils.ft_utils.health_checker import SimpleHealthCheckerConfig
+from miles.utils.function_registry import load_function
 from miles.utils.hf_config import is_dsa, load_hf_config
 from miles.utils.logging_utils import configure_logger_raw
 from miles.utils.lora import is_lora_enabled
 from miles.utils.megatron_args_utils import compute_megatron_world_size_except_dp
-from miles.utils.misc import load_function
 from miles.utils.object_store import ObjectStoreBackend
+from miles.utils.run_uuid import RUN_UUID_LENGTH, generate_run_uuid, validate_run_uuid
 from miles.utils.tracking_utils.ci_history import RECORD_DIR_ENV
 
 logger = logging.getLogger(__name__)
@@ -28,10 +30,10 @@ logger = logging.getLogger(__name__)
 
 def resolve_rollout_function_paths(args) -> tuple[str, str]:
     """The (rollout, eval) function paths the arguments select."""
-    if enable_experimental_rollout_refactor():
-        standard_path = "miles.rollout.inference_rollout.inference_rollout_common.InferenceRolloutFn"
-    else:
+    if use_legacy_rollout_v1():
         standard_path = "miles.rollout.sglang_rollout.generate_rollout"
+    else:
+        standard_path = "miles.rollout.inference_rollout.inference_rollout_common.InferenceRolloutFn"
     rollout_path = args.rollout_function_path or standard_path
     if args.fully_async:
         rollout_path = "miles.rollout.fully_async_rollout.FullyAsyncRolloutFn"
@@ -41,11 +43,15 @@ def resolve_rollout_function_paths(args) -> tuple[str, str]:
 
 
 def _resolve_rollout_functions(args) -> None:
-    if args.fully_async:
-        assert enable_experimental_rollout_refactor(), (
-            "--fully-async needs the class-based rollout API: set MILES_EXPERIMENTAL_ROLLOUT_REFACTOR=1 "
-            "(and propagate it through runtime_env when submitting via Ray)"
+    if args.partial_rollout and args.mask_offpolicy_in_partial_rollout and not use_legacy_rollout_v1():
+        raise ValueError(
+            "--mask-offpolicy-in-partial-rollout does not re-extend the loss mask on the "
+            "class-based rollout path yet; set MILES_USE_LEGACY_ROLLOUT_V1=1"
         )
+    if args.fully_async:
+        assert (
+            not use_legacy_rollout_v1()
+        ), "--fully-async needs the class-based rollout API; unset MILES_USE_LEGACY_ROLLOUT_V1"
         # Runs after validate_multi_lora_args, which selects a rollout function of its own.
         assert not args.multi_lora, "--fully-async and multi-LoRA select different rollout functions"
         assert (
@@ -53,6 +59,10 @@ def _resolve_rollout_functions(args) -> None:
         ), "--fully-async and --rollout-function-path both select a rollout function; pass only one"
         assert not args.colocate, "--fully-async cannot colocate: rollout must keep generating while training runs"
         assert not args.partial_rollout, "--fully-async does not support --partial-rollout"
+        assert args.pause_generation_mode != "abort", (
+            "--fully-async cannot use --pause-generation-mode abort: generation is always in flight, "
+            "so every weight update would kill it and force a full regeneration"
+        )
         assert (
             not args.recompute_logprobs_via_prefill
         ), "--fully-async does not support --recompute-logprobs-via-prefill"
@@ -89,10 +99,25 @@ def reset_arg(parser, name, **kwargs):
 
 
 _FT_CHOICES = ["rollout", "train"]
+_DEFAULT_FT_API_SERVER_PORT = 18080
 
 
 def get_miles_extra_args_provider(add_custom_arguments=None):
     def add_miles_arguments(parser):
+        def add_run_uuid_arguments(parser):
+            parser.add_argument(
+                "--run-uuid",
+                type=str,
+                default=None,
+                help=(
+                    f"Machine-readable identifier for this launch: exactly {RUN_UUID_LENGTH} lowercase "
+                    "hex characters, auto-generated when unset. Unlike the human-readable run "
+                    "names, two runs never share one, so anything stamped with it can be "
+                    "traced back to the launch that produced it."
+                ),
+            )
+            return parser
+
         # Ray
         def add_cluster_arguments(parser):
             parser.add_argument("--actor-num-nodes", type=int, default=1, help="Number of nodes for training actor")
@@ -150,8 +175,19 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--offload-train",
                 action=argparse.BooleanOptionalAction,
                 help=(
-                    "Whether to offload the training actor to CPU during training. "
-                    "This will always be true when --colocate is set."
+                    "Whether to offload the training actor to CPU while the rollout engines generate. "
+                    "Defaults to true when --colocate is set; an explicit --no-offload-train is respected."
+                ),
+            )
+            parser.add_argument(
+                "--clear-quantized-weight-workspaces-on-offload",
+                action=argparse.BooleanOptionalAction,
+                default=True,
+                help=(
+                    "Drop TransformerEngine's cached quantized weights before offloading the "
+                    "training actor. They are rebuilt on the next forward, so backing them up "
+                    "to pinned host memory is pure overhead. Ignored when TransformerEngine "
+                    "is not in use or CUDA graphs are enabled."
                 ),
             )
             parser.add_argument(
@@ -159,7 +195,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 action=argparse.BooleanOptionalAction,
                 help=(
                     "Whether to offload the rollout generator to CPU during training. "
-                    "This will always be true when --colocate is set."
+                    "Defaults to true when --colocate is set; an explicit --no-offload-rollout is respected."
                 ),
             )
 
@@ -190,14 +226,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--stream-optimizer-state-to-disk",
                 action="store_true",
                 help=(
-                    "Stream the fp32 main params and Adam moments through per-bucket files on "
-                    "node-local NVMe during optimizer.step(), bounding GPU residency to one bucket. "
-                    "For when the optimizer state does not fit the GPU *while the step runs*: "
-                    "--offload-train-target=disk cannot help there, because pause/resume happen at "
-                    "phase boundaries and everything is resident again by the time Adam launches. "
-                    "Bit-identical to keeping the state on GPU, at the cost of disk traffic every "
-                    "step. Distinct from --offload-optimizer-states and --optimizer-cpu-offload, "
-                    "and mutually exclusive with both."
+                    "Hold optimizer state in files on node-local NVMe, for when it does not fit the "
+                    "GPU *while the step runs*; --offload-train-target=disk cannot help there.\n"
+                    "adam: streams fp32 main params and moments through per-bucket files, one bucket "
+                    "resident at a time. Requires the distributed optimizer, excludes "
+                    "--offload-optimizer-states and --optimizer-cpu-offload.\n"
+                    "dist_muon: the disk backend for --chunked-optimizer-state-offload, so pass that "
+                    "plus a non-zero --optimizer-state-offload-fraction. --optimizer-cpu-offload is "
+                    "Adam-only. This bounds host residency, not the GPU restore window -- for that "
+                    "set --optimizer-state-offload-chunk-size-mb, which Megatron warns about at 0."
                 ),
             )
             parser.add_argument(
@@ -229,7 +266,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "its own subdirectory). Should be fast local NVMe (e.g. /scratch); a tmpfs "
                     "mount, which /tmp is on many systems, keeps the data in RAM and defeats both. "
                     "Files are per-process and overwritten in place every step (bounded size); "
-                    "defaults to $SCRATCH/miles_train_offload_<uid>."
+                    "defaults to $SCRATCH/miles_train_offload_<uid>. Muon's optimizer-state buffers "
+                    "are unlinked once mapped, so their footprint shows in df but not du."
                 ),
             )
             parser.add_argument(
@@ -241,6 +279,22 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "buffer, which bounds host memory regardless of how much is moved. Used by both "
                     "--offload-train-target=disk and --stream-optimizer-state-to-disk, and each "
                     "allocates its own, so enabling both costs 2x this per rank."
+                ),
+            )
+
+            parser.add_argument(
+                "--colocate-memory-peak-device",
+                type=str,
+                choices=["cpu", "gpu"],
+                default="cpu",
+                help=(
+                    "Which device absorbs the trainer<->rollout handoff overlap. 'cpu' "
+                    "(default): each side offloads before the other onloads, so the "
+                    "engine's weight mirror and the trainer's backup briefly coexist in "
+                    "host memory. 'gpu': onload the other side first, so both sides "
+                    "briefly coexist in GPU memory instead and the two host copies never "
+                    "overlap. Use 'gpu' when host RAM is the tighter budget than the "
+                    "handoff headroom on the GPU."
                 ),
             )
 
@@ -329,15 +383,21 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
-                "--disable-weights-backuper",
-                action="store_false",
-                dest="enable_weights_backuper",
+                "--rematerialize-param-from-master-weight",
+                action="store_true",
                 help=(
-                    "Applies to `megatron` training backend only. "
-                    "Disables the system that backups model weights (Actor, Ref, Old Actor) to CPU RAM. "
-                    "Disabling saves significant host memory but prevents features that rely on weight-swapping, such as computing KL-divergence against a reference model. "
-                    "Note: do not set `--ref-load` and `--keep-old-actor` if disable weights backuper."
+                    "Colocate CPU memory optimization. Drop the actor's parameter weight backup "
+                    "during inference, and rebuild it from the optimizer's master weights on the "
+                    "next train step. Reduces peak CPU memory by 2*param per rank (bf16 training). "
+                    "Works with both the GPU optimizer and the CPU optimizer, but is not compatible "
+                    "with --use-precision-aware-optimizer on GPU. ref/teacher tags keep their "
+                    "backups. Recommended for Grace GPU colocate training."
                 ),
+            )
+            parser.add_argument(
+                "--check-rematerialize-param-from-master-weight",
+                action="store_true",
+                help="Debug: SHA256-verify the first two rematerialize cycles are bit-identical.",
             )
             parser.add_argument(
                 "--megatron-to-hf-mode",
@@ -420,6 +480,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "Allocate optimizer states on CPU during checkpoint loading to prevent GPU OOM on memory spike. "
                 ),
             )
+            parser.add_argument(
+                "--mfu-peak-tflops",
+                type=float,
+                default=None,
+                help=(
+                    "Peak dense BF16 TFLOP/s of one training GPU — the denominator of perf/actor_train_mfu. "
+                    "Defaults to a built-in table keyed on the device name; set this for a device the table "
+                    "does not know, or to report MFU against another precision's peak. With neither available "
+                    "the MFU metric is not logged."
+                ),
+            )
 
             return parser
 
@@ -458,7 +529,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "so its signature should be "
                     "`def generate_rollout(args, rollout_id, data_source, evaluation=False) "
                     "-> RolloutFnTrainOutput | RolloutFnEvalOutput` "
-                    "(see `miles.rollout.sglang_rollout.generate_rollout` for the default impl). "
+                    "(see `miles.rollout.inference_rollout.inference_rollout_common.InferenceRolloutFn` "
+                    "for the default class-based implementation). "
                     "Within each output sample, set at least `tokens`, `response_length`, `reward`, "
                     "and `truncated`."
                 ),
@@ -471,7 +543,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "Run fully async rollout: a persistent worker keeps generating while the trainer "
                     "drains completed groups. Selects `FullyAsyncRolloutFn` as the rollout function; "
                     "evaluation keeps the standard rollout function, which fully async does not serve. "
-                    "Requires train_async.py and MILES_EXPERIMENTAL_ROLLOUT_REFACTOR=1."
+                    "Requires train_async.py."
                 ),
             )
             parser.add_argument(
@@ -604,6 +676,22 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "You could use `miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std` as an example."
                 ),
             )
+            parser.add_argument(
+                "--rollout-submission-granularity",
+                type=str,
+                choices=["group", "sample"],
+                default=None,
+                help=(
+                    "Granularity at which a completed unit frees rollout submission capacity. "
+                    "`group` holds a slot until the whole prompt group returns; `sample` frees each "
+                    "slot as its own sample finishes, so a replacement group goes out once "
+                    "n_samples_per_prompt samples complete, whichever groups they came from. "
+                    "Prompt groups are submitted whole either way. Unset picks the driver default: "
+                    "`sample` under --fully-async, where groups completed beyond the batch are queued "
+                    "for later steps; `group` otherwise, where they are aborted at the end of the step "
+                    "and, without --partial-rollout, discarded."
+                ),
+            )
 
             # partial rollout
             parser.add_argument(
@@ -645,6 +733,42 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "decoupling generation concurrency from the training batch size. None (default) "
                     "keeps the legacy bound of one training batch worth of trajectories "
                     "(rollout_batch_size groups, i.e. rollout_batch_size * n_samples_per_prompt)."
+                ),
+            )
+            parser.add_argument(
+                "--async-data-buffer-capacity-factor",
+                type=float,
+                default=2.0,
+                help=(
+                    "Capacity of the finished-group data buffer between rollout production and "
+                    "training consumption in fully async mode, as a multiple of rollout_batch_size "
+                    "(floor(factor * rollout_batch_size) groups). When the buffer is full the "
+                    "producer blocks until training consumes, so generation cannot run "
+                    "unboundedly ahead of training."
+                ),
+            )
+            parser.add_argument(
+                "--async-unused-samples-handler",
+                type=str,
+                choices=["retry", "drop"],
+                default="drop",
+                help=(
+                    "What to do with a finished group fully async mode does not train on "
+                    "(aborted, or beyond --max-weight-staleness): drop "
+                    "(default) discards the group; retry recycles its prompts into the data "
+                    "source for regeneration. Groups rejected by "
+                    "--dynamic-sampling-filter-path are always dropped."
+                ),
+            )
+            parser.add_argument(
+                "--custom-async-data-buffer-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to a custom DataBuffer subclass replacing the fully async finished-group "
+                    "data buffer (see miles/rollout/fully_async_data_buffer.py). Constructed with "
+                    "DataBufferConstructorInput; it takes over dataflow/staleness control, so the "
+                    "--async-data-buffer-* args apply only if the custom class reads them."
                 ),
             )
             parser.add_argument(
@@ -736,7 +860,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 action="store_true",
                 default=False,
                 help=(
-                    "Pin the RolloutManager (and its co-located router process) to the Ray head node. "
+                    "Pin the RolloutExecutor (and the co-located router process) to the Ray head node. "
                     "Useful in K8s where the head pod has a stable Service address so that "
                     "external agent environments can reliably reach the router."
                 ),
@@ -850,35 +974,36 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="FT components to enable (requires --use-fault-tolerance). "
                 "Choices: rollout, train. Default when omitted: rollout.",
             )
-            parser.add_argument(
-                "--rollout-health-check-interval",
-                type=float,
-                default=30.0,
-                help="Interval in seconds between rollout engine /health_generate checks during generate/eval.",
+            SimpleHealthCheckerConfig.add_arguments(
+                parser,
+                prefix="rollout-health-check",
+                interval_default=30.0,
+                timeout_default=30.0,
+                first_wait_default=0.0,
+                failure_threshold_default=1,
             )
             parser.add_argument(
-                "--rollout-health-check-timeout",
-                type=float,
-                default=30.0,
-                help="Timeout in seconds to wait for a rollout engine /health_generate response before killing it.",
+                "--api-server-host",
+                type=str,
+                default="127.0.0.1",
+                help="Host the HTTP api server binds to. The default only serves the local mini "
+                "fault-tolerance controller; set 0.0.0.0 to accept remote controllers.",
             )
             parser.add_argument(
-                "--rollout-health-check-first-wait",
-                type=float,
-                default=0,
-                help="Initial grace period (in seconds) before starting health checks. This allows time for model compilation and initialization. Increase this value significantly when using deepgemm.",
-            )
-            parser.add_argument(
-                "--control-server-port",
+                "--api-server-port",
                 type=int,
-                default=0,
-                help="Port for HTTP control server. 0 = disabled.",
+                default=None,
+                help=f"Port for HTTP api server. 0 = disabled. Left unset it is "
+                f"{_DEFAULT_FT_API_SERVER_PORT} under --use-fault-tolerance and 0 otherwise, "
+                f"because the mini fault-tolerance controller drives cells over this port.",
             )
             parser.add_argument(
                 "--mini-ft-controller-enable",
-                action="store_true",
-                default=False,
-                help="Enable the mini fault-tolerance controller that auto-heals Fatal cells.",
+                action=argparse.BooleanOptionalAction,
+                default=None,
+                help="Enable the mini fault-tolerance controller that auto-heals Fatal cells. "
+                "Left unset it follows --ft-components and --api-server-port, which is what makes "
+                "--use-fault-tolerance heal on its own.",
             )
             parser.add_argument(
                 "--mini-ft-controller-poll-interval",
@@ -1038,6 +1163,28 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             )
 
             parser.add_argument(
+                "--balance-by-flops",
+                action="store_true",
+                default=False,
+                help=(
+                    "Use FLOPs-based workload estimation for micro-batch partitioning via "
+                    "Karmarkar-Karp instead of first-fit token packing, and distribute mbs "
+                    "across DP ranks by FLOPs. Captures the quadratic attention cost when "
+                    "sequence lengths vary widely. Requires --use-dynamic-batch-size. NOTE: "
+                    "FLOPs balancing does not enforce the per-mbs token cap."
+                ),
+            )
+            parser.add_argument(
+                "--allow-partial-train-step",
+                action="store_true",
+                default=False,
+                help=(
+                    "Train the trailing rollouts that don't fill a whole global_batch_size step as one "
+                    "smaller final step instead of dropping them (rollout-side schedule + dynamic batch "
+                    "size only). Loss normalization and the LR scheduler use the true per-step count."
+                ),
+            )
+            parser.add_argument(
                 "--use-dynamic-batch-size",
                 action="store_true",
                 default=False,
@@ -1103,7 +1250,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 default=None,
                 help=(
-                    "Path to an OmegaConf YAML/JSON file describing evaluation datasets. "
+                    "Path to an OmegaConf YAML/JSON file describing evaluation datasets, or an "
+                    "inline `base64:<payload>` carrying the same document. "
                     "When provided, this overrides --eval-prompt-data."
                 ),
             )
@@ -1260,7 +1408,13 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "while the actor stays frozen. Only takes effect when --advantage-estimator is ppo.",
             )
             parser.add_argument("--critic-load", type=str, default=None, help="The checkpoint for critic model.")
-            parser.add_argument("--critic-save", type=str, default=None, help="The checkpoint for critic model.")
+            parser.add_argument(
+                "--critic-save",
+                type=str,
+                default=None,
+                help="Where to save critic checkpoints. If not set, it defaults to the --save path with a "
+                "'_critic' suffix appended, e.g. --save /ckpts/run1 saves the critic to /ckpts/run1_critic.",
+            )
             parser.add_argument("--critic-lr", type=float, default=None, help="The lr for critic model")
             parser.add_argument(
                 "--critic-lr-warmup-iters",
@@ -1413,6 +1567,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Whether to use the rollout logprobs when calculating the importance sampling ratios. "
                     "If not set, we will use the logprobs from the actor model."
+                ),
+            )
+            parser.add_argument(
+                "--skip-actor-forward-only",
+                action="store_true",
+                default=False,
+                help=(
+                    "Skip the standalone Megatron actor forward-only pass. With --use-rollout-logprobs, "
+                    "those log-probs remain the old-policy baseline; otherwise detached training log-probs "
+                    "are reused and the actor importance log-ratio is exactly 0. This requires a single "
+                    "optimizer step. The skipped pass's rollout/log_probs metric is not emitted."
                 ),
             )
             # Off-Policy Correction using Importance Sampling: https://fengyao.notion.site/off-policy-rl
@@ -2129,8 +2294,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="JSON array of fault injection actions. Each action: "
                 '{"at_rollout": N, "action": "stop_cell_at_end"|"start_cell_at_end"|"crash_before_allreduce", '
-                '"cell_index": I, "rank": 0, "attempt": 0}. '
-                "cell_index -1 means last cell.",
+                '"cell_id": "trainer-actor-2", "rank": 0, "attempt": 0}. '
+                "cell_id is the full cell id (spec name plus cell index) of the target cell.",
             )
             parser.add_argument(
                 "--ci-inject-rollout-data-path",
@@ -2320,7 +2485,9 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             Add custom Megatron plugins arguments.
             This is a placeholder for any additional arguments that might be needed.
             """
-            # Custom arguments can be added here
+            from miles_plugins.models.deepseek_v4.arguments import add_dsv4_arguments
+
+            add_dsv4_arguments(parser)
             parser.add_argument(
                 "--freeze-indexer",
                 action="store_true",
@@ -2393,6 +2560,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
             )
             parser.add_argument(
+                "--ci-metric-checker-expect-num",
+                type=int,
+                default=None,
+                help="Require exactly this many eval checks, all meeting the CI threshold.",
+            )
+            parser.add_argument(
                 "--ci-save-grad-norm",
                 type=str,
                 default=None,
@@ -2415,25 +2588,36 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
         def add_session_arguments(parser):
             parser.add_argument(
                 "--use-session-server",
-                action="store_true",
+                nargs="?",
+                const=True,
                 default=False,
                 help="Start a standalone session server for TITO/session support. "
-                "Requires --hf-checkpoint and --chat-template-path to also be set.",
+                "Requires --hf-checkpoint. A named --tito-model resolves its registered template; "
+                "--tito-model=default uses the checkpoint-native or explicit --chat-template-path template. "
+                "Bare flag (or 'v1') selects the append-only linear v1 server; "
+                "'--use-session-server v2' selects the tree-serving v2 "
+                "(multi-lineage trajectories, always-branch).",
+            )
+            parser.add_argument(
+                "--session-server-workers",
+                type=int,
+                default=32,
+                help="Number of session server instances.",
             )
             parser.add_argument(
                 "--session-server-ip",
                 type=str,
                 default=None,
-                help="IP address of the standalone session server. Defaults to sglang-router-ip.",
+                help="Address the session servers bind to, e.g. 0.0.0.0 to accept traffic from outside "
+                "the cluster. Peers still reach them on the address their worker was placed on. "
+                "Defaults to that placed address.",
             )
             parser.add_argument(
                 "--session-server-port",
                 type=int,
-                nargs="+",
                 default=None,
-                help="Port(s) of the standalone session servers. One value: a single server on "
-                "that port. Two values: a half-open range [start, end), one server per port. "
-                "Auto-allocates a single port if not set.",
+                help="Base port for the session servers, so a network policy can whitelist a known range. "
+                "Instance i listens on this port plus i. Defaults to a dynamically allocated port.",
             )
             parser.add_argument(
                 "--tito-model",
@@ -2443,6 +2627,39 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="TITO tokenizer type for pretokenized prefix reuse. "
                 "Controls how token IDs are computed for messages appended after "
                 "the pretokenized prefix in multi-turn agentic sessions.",
+            )
+            parser.add_argument(
+                "--session-message-matcher",
+                type=str,
+                default="strict",
+                help=(
+                    "Process-wide session history matcher: strict (default), "
+                    "loose_tool_call, role_content_only, or a trusted dotted import "
+                    "path. role_content_only is a high-risk opt-in that can collapse "
+                    "different tool-call lineages and does not reconcile call IDs."
+                ),
+            )
+            parser.add_argument(
+                "--session-sample-picker-path",
+                type=str,
+                default="miles.rollout.session.v2.picker_hub.drop_retries",
+                help="v2 only. Import path of the sample-pick hook for the "
+                "session samples op: fn(leaf_samples, session_metadata) -> "
+                "list[Sample], a pure selection over the per-leaf raw samples. "
+                "Runs synchronously inside the session server process; long CPU "
+                "work stalls every session on the instance. Default: the "
+                "temporal-supersession retry trim.",
+            )
+            parser.add_argument(
+                "--session-sample-postprocessor-path",
+                type=str,
+                default="miles.rollout.session.v2.postprocessor_hub.default_postprocess",
+                help="v2 only. Import path of the post-process hook for the "
+                "session samples op: fn(leaf_samples, session_metadata) -> "
+                "list[Sample], finalizing loss masks / rewards over the picked "
+                "samples. Runs synchronously inside the session server process. "
+                "Default: exactly-once completion masking + rewards keyed by "
+                "response id.",
             )
             return parser
 
@@ -2467,6 +2684,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
         if add_custom_arguments is not None:
             parser = add_custom_arguments(parser)
 
+        parser = add_run_uuid_arguments(parser)
         parser = add_cluster_arguments(parser)
         parser = add_train_arguments(parser)
         parser = add_rollout_arguments(parser)
@@ -2502,7 +2720,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
         parser = add_prefill_decode_disaggregation_arguments(parser)
         parser = add_ci_arguments(parser)
         parser = add_custom_megatron_plugins_arguments(parser)
-        if enable_experimental_rollout_refactor():
+        if not use_legacy_rollout_v1():
             parser = add_user_provided_function_arguments(parser)
 
         reset_arg(
@@ -2510,7 +2728,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             "--custom-config-path",
             type=str,
             default=None,
-            help="Path to the YAML config for custom function arguments.",
+            help="Path to the YAML config for custom function arguments, or an inline `base64:<payload>`.",
         )
         reset_arg(parser, "--padded-vocab-size", type=int, default=None)
 
@@ -2547,12 +2765,15 @@ def parse_args(add_custom_arguments=None):
         args.world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
         args = set_default_megatron_args(args)
     else:
-        from miles.backends.experimental.fsdp_utils.arguments import load_fsdp_args
+        from miles.backends.fsdp_utils.arguments import load_fsdp_args
 
         args = load_fsdp_args(extra_args_provider=add_miles_arguments)
         # TODO: unify this .rank and .world_size w/ indep_dp logics
         args.rank = 0  # Primary process rank for wandb initialization
         args.world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
+
+        if args.hf_checkpoint:
+            args.num_layers = resolve_fsdp_num_layers(load_hf_config(args.hf_checkpoint))
 
         assert args.context_parallel_size == 1, "Context parallelism is not supported for FSDP backend."
 
@@ -2580,7 +2801,7 @@ def parse_args(add_custom_arguments=None):
                 "pipeline_model_parallel_size is 1."
             )
     else:
-        from miles.backends.experimental.fsdp_utils.arguments import validate_hybrid_shard_args
+        from miles.backends.fsdp_utils.arguments import validate_hybrid_shard_args
 
         validate_hybrid_shard_args(args)
 
@@ -2609,7 +2830,7 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
     if args.eval_config:
         from omegaconf import OmegaConf
 
-        cfg = OmegaConf.load(args.eval_config)
+        cfg = OmegaConf.create(resolve_file_arg(args.eval_config))
         cfg_dict = OmegaConf.to_container(cfg, resolve=True)
         if not isinstance(cfg_dict, dict):
             raise ValueError("--eval-config must contain a mapping at the root.")
@@ -2655,14 +2876,80 @@ def _resolve_ft_components(args: argparse.Namespace) -> list[str]:
     return list(args.ft_components)
 
 
+def _validate_rematerialize_param_from_master_weight(args):
+    if not args.rematerialize_param_from_master_weight:
+        return
+    if args.debug_train_only:
+        # update_weights never runs, so the param buffer would never be paused.
+        args.rematerialize_param_from_master_weight = False
+        return
+    assert (
+        args.train_backend == "megatron"
+    ), "--rematerialize-param-from-master-weight reads Megatron's distributed-optimizer main params"
+    from miles.backends.megatron_utils.lora_utils import is_lora_enabled
+
+    assert not is_lora_enabled(args), "--rematerialize-param-from-master-weight does not support LoRA"
+    assert not args.debug_disable_optimizer, "--debug-disable-optimizer leaves no main params to rematerialize from"
+    assert not args.indep_dp, (
+        "--rematerialize-param-from-master-weight drops the backup inside update_weights, which "
+        "RayTrainGroup runs on the first alive cell only. Every other cell would keep it for the whole "
+        "run. Lift this once all cells update weights."
+    )
+    assert args.colocate and args.offload_train
+    assert args.offload_train_target == "cpu", (
+        "--offload-train-target=disk streams the weights to NVMe and reads them back from GPU after "
+        "resume, so there is no backup for the rebuild to replace"
+    )
+    assert args.use_distributed_optimizer
+    assert not args.keep_old_actor
+    assert not args.use_precision_aware_optimizer or args.optimizer_cpu_offload, (
+        "--use-precision-aware-optimizer on GPU keeps the master weights inside TE FusedAdam, stored as "
+        "int16 remainders of the params. There is nothing standalone to rebuild from. Add "
+        "--optimizer-cpu-offload, which holds standalone masters instead."
+    )
+    assert (
+        not args.overlap_param_gather
+    ), "the rebuild calls DDP.start_param_sync outside the training step; overlap-param-gather does not support that"
+    assert (
+        args.compute_advantages_and_returns
+    ), "the per-cycle rebuild runs in the compute_advantages_and_returns block; without it training would run on dropped weights"
+    assert (
+        args.num_critic_only_steps == 0
+    ), "critic-only steps run update_weights repeatedly without an intervening actor wake_up"
+    args.disable_param_buffers_cpu_backup = True
+    if args.ci_test:
+        args.check_rematerialize_param_from_master_weight = True
+
+
+def _resolve_api_server_port(args: argparse.Namespace) -> int:
+    if (port := args.api_server_port) is not None:
+        return port
+    return _DEFAULT_FT_API_SERVER_PORT if args.ft_components else 0
+
+
+def _resolve_mini_ft_controller_enable(args: argparse.Namespace) -> bool:
+    if (enable := args.mini_ft_controller_enable) is not None:
+        return enable
+    return bool(args.ft_components) and args.api_server_port != 0
+
+
 def miles_validate_args(args):
+    if args.custom_config_path:
+        data = yaml.safe_load(resolve_file_arg(args.custom_config_path)) or {}
+        for k, v in data.items():
+            if hasattr(args, k):
+                logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
+            setattr(args, k, v)
+
     validate_dashboard_args(args)
 
     args.ft_components = _resolve_ft_components(args)
+    assert not ("rollout" in args.ft_components and args.eval_num_gpus > 0), (
+        "rollout fault tolerance does not support a dedicated eval fleet (--eval-num-gpus > 0): "
+        "the eval fleet pins engine addresses once at startup, so a healed eval cell would make "
+        "every later eval skip silently"
+    )
     args.eval_datasets = _resolve_eval_datasets(args)
-
-    if args.mini_ft_controller_enable and args.control_server_port == 0:
-        raise ValueError("--mini-ft-controller-enable requires --control-server-port to be set (non-zero)")
 
     if "train" in args.ft_components:
         args.indep_dp = True
@@ -2692,13 +2979,46 @@ def miles_validate_args(args):
     if args.recompute_logprobs_via_prefill:
         assert args.true_on_policy_mode, "--recompute-logprobs-via-prefill requires --true-on-policy-mode"
 
+    if args.use_session_server not in (False, True, "v1", "v2"):
+        raise ValueError(
+            f"--use-session-server={args.use_session_server!r} is not a known session server "
+            "version; pass it bare (or 'v1') for the append-only linear server, or 'v2' for "
+            "tree serving."
+        )
+
+    assert not (
+        args.use_session_server and args.partial_rollout
+    ), "--use-session-server does not support --partial-rollout"
+
+    if args.use_session_server == "v2":
+        unsupported = [
+            flag
+            for enabled, flag in (
+                (args.group_rm, "--group-rm"),
+                (args.recompute_logprobs_via_prefill, "--recompute-logprobs-via-prefill"),
+            )
+            if enabled
+        ]
+        if unsupported:
+            raise ValueError(
+                f"--use-session-server v2 does not support {', '.join(unsupported)}; v2 returns list[Sample]"
+            )
+
+    if args.use_session_server and args.use_rollout_routing_replay and args.pause_generation_mode == "retract":
+        logger.warning(
+            "--use-session-server with --use-rollout-routing-replay and "
+            "--pause-generation-mode=retract returns full R3 data on every turn; "
+            "R3 payloads can become very large. TODO: Retract-mode weight updates R3 "
+            "have known issues in SGLang and need to be fixed."
+        )
+
     if not args.use_session_server and args.tito_model != TITOTokenizerType.DEFAULT.value:
         raise ValueError(
             f"--tito-model={args.tito_model} requires --use-session-server; "
             "this flag only configures the session-server TITO middleware."
         )
 
-    # DEFAULT uses the checkpoint's native or caller-provided template.  Its
+    # DEFAULT uses the checkpoint's native or caller-provided template. Its
     # maximal four-role surface is best-effort rather than a Miles-verified
     # FixedTemplate contract.
     if args.use_session_server and args.tito_model == TITOTokenizerType.DEFAULT.value:
@@ -2774,6 +3094,11 @@ def miles_validate_args(args):
             raise ValueError("--opd-log-prob-top-k must be non-negative.")
         if args.opd_log_prob_top_k > 0 and args.opd_type != "sglang":
             raise ValueError("--opd-log-prob-top-k is currently supported only with --opd-type=sglang.")
+        if args.opd_log_prob_top_k > 0 and args.opd_top_k_strategy != "only-teacher" and not use_legacy_rollout_v1():
+            raise ValueError(
+                "--opd-log-prob-top-k with a student-side strategy needs opd_student_top_logprobs, "
+                "which only the v1 rollout produces; set MILES_USE_LEGACY_ROLLOUT_V1=1"
+            )
         if args.opd_teacher_urls:
             if args.opd_type != "sglang":
                 raise ValueError("--opd-teacher-urls is only supported with --opd-type=sglang.")
@@ -2821,7 +3146,7 @@ def miles_validate_args(args):
             or not os.path.exists(os.path.join(args.load, "latest_checkpointed_iteration.txt"))
         ):
             args.load = args.ref_load or args.hf_checkpoint
-        args.start_rollout_id = 0
+            args.start_rollout_id = 0
     else:
         if (
             args.load is None
@@ -2926,7 +3251,7 @@ def miles_validate_args(args):
             args.custom_tis_function_path is not None
         ), "custom_tis_function_path must be set when get_mismatch_metrics is set"
 
-        if args.use_rollout_logprobs:
+        if args.use_rollout_logprobs and not args.skip_actor_forward_only:
             logger.info(
                 "get_mismatch_metrics is set; For metrics calculation, the log probs will still be recomputed by training engine. One more forward pass will be applied."
             )
@@ -2935,6 +3260,23 @@ def miles_validate_args(args):
         assert args.max_tokens_per_gpu is not None, "max_tokens_per_gpu must be set when use_dynamic_batch_size is set"
         if args.log_probs_max_tokens_per_gpu is None:
             args.log_probs_max_tokens_per_gpu = args.max_tokens_per_gpu
+
+    # --use-dynamic-global-batch-size has two motivations:
+    # 1. compaction/subagent rollouts: static micro-batching cannot guarantee alignment
+    #    when the physical sample count is data-dependent, so --use-dynamic-batch-size
+    #    is required.
+    # 2. multi-LoRA (auto-enabled, no compaction/subagent): the per-round sample count is
+    #    a config-shaped multiple of dp_size trained as exactly one step on the legacy
+    #    training-side schedule; static micro-batching stays valid there.
+    if args.use_dynamic_global_batch_size and not args.multi_lora:
+        assert args.use_dynamic_batch_size, (
+            "--use-dynamic-global-batch-size requires --use-dynamic-batch-size (with --max-tokens-per-gpu): "
+            "static micro-batching cannot guarantee dp_size * mb_group alignment when the physical sample count "
+            "is data-dependent; this configuration is not supported."
+        )
+
+    if getattr(args, "balance_by_flops", False):
+        assert args.use_dynamic_batch_size, "--balance-by-flops requires --use-dynamic-batch-size"
 
     if args.eps_clip_high is None:
         args.eps_clip_high = args.eps_clip
@@ -2971,16 +3313,12 @@ def miles_validate_args(args):
 
     args.use_critic = args.advantage_estimator == "ppo"
     if args.use_critic:
+        assert not args.indep_dp, (
+            "Shared Actor/Critic PPO hands the critic outputs to a single trainer cell as external data; "
+            "it does not support --indep-dp, which train fault tolerance also implies"
+        )
         if args.train_backend != "megatron":
             raise ValueError("Shared Actor/Critic PPO requires the Megatron backend")
-        assert (
-            args.megatron_to_hf_mode != "bridge"
-        ), "Critic models are not supported with --megatron-to-hf-mode bridge"
-        assert not enable_experimental_ft_trainer(), (
-            "Shared Actor/Critic PPO is not supported with MILES_EXPERIMENTAL_FT_TRAINER=1: the v2 "
-            "fault-tolerant train group cannot route critic values or lifecycle options yet. "
-            "Unset MILES_EXPERIMENTAL_FT_TRAINER or use a non-PPO advantage estimator."
-        )
         assert args.kl_coef == 0, (
             "Shared Actor/Critic PPO does not support reward-level KL (--kl-coef): the critic "
             "trains before the actor and never sees ref log probs, so its value targets would "
@@ -2993,6 +3331,9 @@ def miles_validate_args(args):
         args.critic_load = args.load
     if args.critic_lr is None:
         args.critic_lr = args.lr
+    if args.critic_save is None and args.save is not None:
+        # a sibling dir, not args.save itself: sharing a dir would clobber the actor's iteration tracker
+        args.critic_save = args.save.rstrip("/") + "_critic"
 
     if args.offload:
         args.offload_train = True
@@ -3033,6 +3374,9 @@ def miles_validate_args(args):
             getattr(args, "prefill_num_servers", None) is None
         ), "P2P weight transfer mode has not been tested when PD is enabled."
         assert args.lora_rank <= 0, "LoRA weight sync is not supported for p2p (RDMA) weight transfer."
+        assert (
+            args.megatron_to_hf_mode != "bridge"
+        ), f"{args.update_weight_transfer_mode} mode is not supported when use megatron-bridge"
 
     if args.update_weight_transfer_mode == "disk-delta":
         assert not args.colocate, (
@@ -3096,44 +3440,59 @@ def miles_validate_args(args):
 
     if args.offload_train:
         args.disable_grad_buffers_cpu_backup = True
-        args.disable_param_buffers_cpu_backup = args.enable_weights_backuper
+        args.disable_param_buffers_cpu_backup = True
+
+    _validate_rematerialize_param_from_master_weight(args)
+
+    if (args.offload_train_target == "disk" or args.stream_optimizer_state_to_disk) and (
+        args.offload_train_disk_dir is None
+    ):
+        uid = os.getuid() if hasattr(os, "getuid") else 0
+        args.offload_train_disk_dir = os.path.join(os.environ.get("SCRATCH", "/scratch"), f"miles_train_offload_{uid}")
 
     if args.offload_train_target == "disk":
         assert args.offload_train, "--offload-train-target=disk requires --offload-train"
         assert (
             args.train_backend == "megatron"
         ), "--offload-train-target=disk is only supported on the megatron backend"
-        assert args.enable_weights_backuper, (
-            "--offload-train-target=disk requires the weights backuper (do not pass "
-            "--disable-weights-backuper): disk-offloaded weights are read from GPU after resume, "
-            "not from a CPU backup."
-        )
         assert args.offload_train_disk_chunk_mb > 0, "--offload-train-disk-chunk-mb must be positive"
-        if args.offload_train_disk_dir is None:
-            uid = os.getuid() if hasattr(os, "getuid") else 0
-            args.offload_train_disk_dir = os.path.join(
-                os.environ.get("SCRATCH", "/scratch"), f"miles_train_offload_{uid}"
-            )
         logger.info(
             f"Train offload target=disk, dir={args.offload_train_disk_dir}, "
             f"chunk={args.offload_train_disk_chunk_mb}MB"
         )
 
     if args.stream_optimizer_state_to_disk:
-        assert args.offload_train_target == "disk", (
-            "--stream-optimizer-state-to-disk requires --offload-train-target=disk. Both answer the "
-            "same pressure and are only ever deployed as a pair, so that is the only combination "
-            "validated; streaming alone runs but is untested."
+        assert args.offload_train_target == "disk" or not args.offload_train, (
+            "--stream-optimizer-state-to-disk with --offload-train requires "
+            "--offload-train-target=disk: a run that cannot hold the optimizer state on GPU for "
+            "the duration of the step will not hold a pinned host copy of the whole actor either. "
+            "Disaggregated runs do not offload the trainer at all, and the target is unused there."
         )
         assert not args.indep_dp, (
             "--stream-optimizer-state-to-disk does not support --indep-dp: each cell has its own "
             "process group, so torch.distributed.get_rank() restarts at 0 per cell and two cells "
             "on one node would share a store directory"
         )
-        assert args.use_distributed_optimizer, "--stream-optimizer-state-to-disk requires the distributed optimizer"
-        assert (
-            args.optimizer == "adam"
-        ), f"--stream-optimizer-state-to-disk requires --optimizer adam, got {args.optimizer}"
+        _muon_disk_state = "muon" in (args.optimizer or "").lower()
+        if _muon_disk_state:
+            # Megatron's validate_args has not run yet, so gate on the dist_ prefix rather than
+            # use_layer_wise_distributed_optimizer.
+            assert args.optimizer.lower().startswith("dist_"), (
+                "--stream-optimizer-state-to-disk with Muon requires the layer-wise distributed "
+                f"optimizer; pass --optimizer dist_muon, got {args.optimizer}"
+            )
+            assert args.chunked_optimizer_state_offload and args.optimizer_state_offload_fraction > 0.0, (
+                "--stream-optimizer-state-to-disk with Muon is the disk backend for the chunked "
+                "offloader; pass --chunked-optimizer-state-offload and a non-zero "
+                "--optimizer-state-offload-fraction"
+            )
+        else:
+            assert (
+                args.use_distributed_optimizer
+            ), "--stream-optimizer-state-to-disk requires the distributed optimizer"
+            assert (
+                args.optimizer == "adam"
+            ), f"--stream-optimizer-state-to-disk requires --optimizer adam, got {args.optimizer}"
         assert not (args.multi_lora or is_lora_enabled(args)), (
             "--stream-optimizer-state-to-disk does not support LoRA: the LoRA checkpoint path "
             "persists optimizer.state_dict(), which the store leaves empty, and restores the "
@@ -3141,7 +3500,7 @@ def miles_validate_args(args):
         )
         assert not args.optimizer_cpu_offload, "--stream-optimizer-state-to-disk excludes --optimizer-cpu-offload"
         assert (
-            not args.offload_optimizer_states
+            _muon_disk_state or not args.offload_optimizer_states
         ), "--stream-optimizer-state-to-disk excludes --offload-optimizer-states"
         assert (
             not args.use_precision_aware_optimizer
@@ -3175,8 +3534,8 @@ def miles_validate_args(args):
     # (The fleet-vs-CheckpointEvalFn conflict is asserted where the posture is derived.)
     if args.eval_uses_snapshots:
         assert (
-            enable_experimental_rollout_refactor()
-        ), "Snapshot eval requires the class-based rollout API (MILES_EXPERIMENTAL_ROLLOUT_REFACTOR=1)."
+            not use_legacy_rollout_v1()
+        ), "Snapshot eval requires the class-based rollout API; unset MILES_USE_LEGACY_ROLLOUT_V1"
         assert args.eval_interval is not None, "Snapshot eval requires --eval-interval."
         assert args.eval_hf_dir is not None or args.save_hf is not None, (
             "Snapshot eval requires a snapshot source: set --eval-hf-dir (staging exports) "
@@ -3237,13 +3596,7 @@ def miles_validate_args(args):
     if args.use_rollout_routing_replay:
         args.use_routing_replay = True
 
-    if args.custom_config_path:
-        with open(args.custom_config_path) as f:
-            data = yaml.safe_load(f) or {}
-        for k, v in data.items():
-            if hasattr(args, k):
-                logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
-            setattr(args, k, v)
+    args.run_uuid = generate_run_uuid() if args.run_uuid is None else validate_run_uuid(args.run_uuid)
 
     if args.use_rollout_indexer_replay:
         args.use_indexer_replay = True
@@ -3283,7 +3636,81 @@ def miles_validate_args(args):
             args.use_dynamic_batch_size is False
         ), "Dynamic batch size is not supported for bshd format. Please specify --micro-batch-size instead."
 
+    if args.skip_actor_forward_only:
+        validate_skip_actor_forward_only(args)
+
     _maybe_apply_dumper_overrides(args)
+
+    args.api_server_port = _resolve_api_server_port(args)
+    args.mini_ft_controller_enable = _resolve_mini_ft_controller_enable(args)
+
+    if args.mini_ft_controller_enable and args.api_server_port == 0:
+        raise ValueError("--mini-ft-controller-enable requires --api-server-port to be set (non-zero)")
+
+
+def validate_skip_actor_forward_only(args) -> None:
+    option = "--skip-actor-forward-only"
+    assert args.train_backend == "megatron", f"{option} only supports --train-backend megatron"
+    assert args.loss_type == "policy_loss", f"{option} only supports --loss-type policy_loss"
+    assert args.compute_advantages_and_returns, f"{option} requires actor advantage computation"
+
+    incompatible_options = [
+        name
+        for name, enabled in (
+            ("--keep-old-actor", args.keep_old_actor),
+            ("--kl-coef", args.kl_coef != 0),
+            ("--use-opd", args.use_opd),
+            ("--hidden-dropout", args.hidden_dropout != 0),
+            ("--attention-dropout", args.attention_dropout != 0),
+            ("--lora-dropout", args.lora_dropout != 0),
+            ("--moe-input-jitter-eps", args.moe_input_jitter_eps not in (None, 0)),
+            ("--moe-router-force-load-balancing", args.moe_router_force_load_balancing),
+            ("--moe-router-force-biased", args.moe_router_force_biased is not None),
+            (
+                "--moe-router-load-balancing-type sinkhorn",
+                "sinkhorn" in args.moe_router_load_balancing_type,
+            ),
+            ("--use-rollout-entropy", args.use_rollout_entropy),
+            ("--true-on-policy-mode", args.true_on_policy_mode),
+            ("--log-correct-samples", args.log_correct_samples),
+            ("--rollout-data-postprocess-path", args.rollout_data_postprocess_path is not None),
+            (
+                "--custom-megatron-before-log-prob-hook-path",
+                args.custom_megatron_before_log_prob_hook_path is not None,
+            ),
+            (
+                "--custom-megatron-before-train-step-hook-path",
+                args.custom_megatron_before_train_step_hook_path is not None,
+            ),
+            ("--custom-model-provider-path", args.custom_model_provider_path is not None),
+            (
+                "--dumper-source-patcher-config-train",
+                args.dumper_source_patcher_config_train is not None,
+            ),
+            ("--save-debug-train-data", args.save_debug_train_data is not None and args.dump_details is None),
+            (
+                "--use-routing-replay",
+                args.use_routing_replay and not args.use_rollout_routing_replay,
+            ),
+            (
+                "--use-indexer-replay",
+                args.use_indexer_replay and not args.use_rollout_indexer_replay,
+            ),
+        )
+        if enabled
+    ]
+    assert not incompatible_options, f"{option} is incompatible with: {', '.join(incompatible_options)}"
+
+    assert args.num_steps_per_rollout in (None, 1), (
+        f"{option} requires exactly one optimizer step per rollout; "
+        f"got --num-steps-per-rollout {args.num_steps_per_rollout}"
+    )
+    if not args.use_dynamic_global_batch_size and not args.multi_lora:
+        samples_per_rollout = args.rollout_batch_size * args.n_samples_per_prompt
+        assert args.global_batch_size == samples_per_rollout, (
+            f"{option} requires exactly one optimizer step for {samples_per_rollout} rollout samples; "
+            f"got --global-batch-size {args.global_batch_size}"
+        )
 
 
 def validate_async_off_policy_correction(args) -> None:
@@ -3312,12 +3739,12 @@ def _maybe_apply_dumper_overrides(args) -> None:
         return
 
     if args.use_fault_tolerance:
-        logger.info("Dumper mode: disabling --use-fault-tolerance to suppress RolloutHealthMonitor heartbeats")
+        logger.info("Dumper mode: disabling --use-fault-tolerance to suppress fault tolerance heartbeats")
         args.use_fault_tolerance = False
+        args.ft_components = []
 
     logger.info("Dumper mode: all heartbeat mechanisms disabled")
     args.router_disable_health_check = True
-    args.rollout_health_check_interval = 1e18
 
     if args.start_rollout_id is None:
         args.start_rollout_id = 0
@@ -3332,6 +3759,23 @@ def _maybe_apply_dumper_overrides(args) -> None:
     args.save = None
     args.save_interval = None
     args.save_retain_interval = None
+
+
+def resolve_fsdp_num_layers(hf_config) -> int | None:
+    """Decoder-layer count for the FSDP path.
+
+    ``num_layers`` comes from the Megatron parser, but backend-agnostic code reads it:
+    ``sglang_rollout`` reshapes the R3 routing buffer as ``[num_tokens, num_layers, topk]``. The
+    text config wins when present, since a top-level ``num_hidden_layers`` may describe a vision
+    tower instead.
+    """
+    getter = getattr(hf_config, "get_text_config", None)
+    text_config = (getter() if callable(getter) else getattr(hf_config, "text_config", None)) or hf_config
+
+    num_layers = getattr(text_config, "num_hidden_layers", None)
+    if num_layers is None:
+        num_layers = getattr(hf_config, "num_hidden_layers", None)
+    return num_layers
 
 
 def hf_validate_args(args, hf_config):

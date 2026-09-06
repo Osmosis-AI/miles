@@ -53,6 +53,24 @@ FIXED_TEMPLATE_SMOKE_CONFIGS: tuple[FixedTemplateSmokeConfig, ...] = (
         tito_model=TITOTokenizerType.QWEN35.value,
     ),
     FixedTemplateSmokeConfig(
+        name="qwen3.6-fixed",
+        hf_checkpoint="Qwen/Qwen3.6-35B-A3B",
+        chat_template_path=resolve_fixed_chat_template(TITOTokenizerType.QWEN36)[0],
+        tito_model=TITOTokenizerType.QWEN36.value,
+    ),
+    FixedTemplateSmokeConfig(
+        name="qwen3.8-small-fixed",
+        hf_checkpoint="Qwen/Qwen3.8-27B",
+        chat_template_path=resolve_fixed_chat_template(TITOTokenizerType.QWEN38_SMALL)[0],
+        tito_model=TITOTokenizerType.QWEN38_SMALL.value,
+    ),
+    FixedTemplateSmokeConfig(
+        name="qwen4-exp-fixed",
+        hf_checkpoint="Qwen/Qwen3.8-Flash-Next",
+        chat_template_path=resolve_fixed_chat_template(TITOTokenizerType.QWEN4_EXP)[0],
+        tito_model=TITOTokenizerType.QWEN4_EXP.value,
+    ),
+    FixedTemplateSmokeConfig(
         name="qwen3-thinking2507-fixed",
         hf_checkpoint="Qwen/Qwen3-4B-Thinking-2507",
         chat_template_path=resolve_fixed_chat_template(TITOTokenizerType.QWENNEXT)[0],
@@ -144,6 +162,7 @@ def test_bundled_fixed_template_session_smoke(config: FixedTemplateSmokeConfig):
 
             session_payload = fetch_session_payload(env.url, session_id)
             metadata = session_payload["metadata"]
+            assert len(metadata["tree"]["nodes"]) == turn_idx + 1
             remote_mismatch = metadata.get("tito_session_mismatch", [])
             local_mismatch = compute_local_session_mismatch(
                 tokenizer,

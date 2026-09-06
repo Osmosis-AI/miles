@@ -12,7 +12,7 @@ armed assertion inherited from the base test.
 import glob
 import os
 
-from tests.ci.ci_register import register_cuda_ci
+from tests.ci.ci_register import register_cuda_ci, register_rocm_ci
 from tests.ci.metric_history import register_ci_gate
 
 import miles.utils.external_utils.command_utils as U
@@ -27,6 +27,11 @@ register_cuda_ci(
     suite="stage-c-4-gpu-h200",
     labels=["miles-plugin"],
 )
+register_rocm_ci(
+    est_time=600,
+    suite="stage-c-4-gpu-mi350",
+    labels=["miles-plugin", "amd"],
+)
 
 register_ci_gate(metric_key="train/grad_norm")
 register_ci_gate(metric_key="train/ppo_kl")
@@ -36,8 +41,8 @@ register_ci_gate(metric_key="rollout/raw_reward")
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
+    U.exec_command_cpu("mkdir -p /root/models /root/datasets")
+    U.exec_command_cpu(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
     U.hf_download_dataset("zhuzilin/dapo-math-17k")
     U.convert_checkpoint(model_name=MODEL_NAME, megatron_model_type=MODEL_TYPE, num_gpus_per_node=NUM_GPUS)
 
@@ -69,12 +74,20 @@ def _assert_streamed():
     logs = glob.glob("/tmp/ray/session_latest/logs/worker-*")
     assert logs, "no Ray worker logs to check for the streaming path"
 
+    initialized = set()
     streamed = set()
     for path in logs:
         with open(path, errors="ignore") as f:
-            if any("NVMe streaming step:" in line for line in f):
+            text = f.read()
+            if "NVMe optimizer main-param initialization:" in text:
+                initialized.add(path)
+            if "NVMe streaming step:" in text:
                 streamed.add(path)
 
+    assert len(initialized) == NUM_GPUS, (
+        f"expected {NUM_GPUS} ranks to initialize main params through NVMe, "
+        f"saw {len(initialized)}: {sorted(initialized)}"
+    )
     assert (
         len(streamed) == NUM_GPUS
     ), f"expected {NUM_GPUS} ranks to log streaming steps, saw {len(streamed)}: {sorted(streamed)}"

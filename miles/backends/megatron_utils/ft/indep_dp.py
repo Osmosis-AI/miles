@@ -7,7 +7,6 @@ import torch.distributed as dist
 from megatron.core import mpu
 
 from miles.utils.distributed_utils import get_gloo_group
-from miles.utils.environ import enable_experimental_ft_trainer
 from miles.utils.ft_utils.indep_dp import IndepDPInfo
 from miles.utils.ft_utils.process_group_utils import GeneralPGUtil, GroupInfo, collective_bool_and
 from miles.utils.tracking_utils.structured_log import log_structured
@@ -54,6 +53,7 @@ def create_indep_dp_group(
     gloo_pg = _create(ProcessGroupGloo, "gloo")
     log_structured(
         logger.info,
+        tag="ft",
         op="create_pg",
         cell=indep_dp_info.cell_index,
         cell_rank=indep_dp_info.alive_rank,
@@ -82,6 +82,7 @@ def reconfigure_indep_dp_group(
     old = parallel_state.indep_dp
     log_structured(
         logger.info,
+        tag="ft",
         op="reconfig",
         phase="start",
         cell=indep_dp_info.cell_index,
@@ -100,12 +101,21 @@ def reconfigure_indep_dp_group(
         megatron_world_size=megatron_world_size,
     )
     log_structured(
-        logger.info, op="reconfig", phase="end", cell=indep_dp_info.cell_index, quorum=indep_dp_info.quorum_id
+        logger.info,
+        tag="ft",
+        op="reconfig",
+        phase="end",
+        cell=indep_dp_info.cell_index,
+        quorum=indep_dp_info.quorum_id,
     )
 
 
 def allreduce_grads_and_losses_across_replicas(
-    args, model: Sequence["DDP"], parallel_state: ParallelState, losses_reduced: list
+    args,
+    model: Sequence["DDP"],
+    parallel_state: ParallelState,
+    losses_reduced: list,
+    num_rollouts: int | None = None,
 ) -> tuple[bool, dict[str, float]]:
     assert not args.calculate_per_token_loss, "calculate_per_token_loss is not supported with indep_dp yet"
     assert parallel_state.intra_dp.size == 1, (
@@ -117,6 +127,7 @@ def allreduce_grads_and_losses_across_replicas(
     util = GeneralPGUtil.create(pg)
     log_structured(
         logger.info,
+        tag="ft",
         op="cross_cell",
         phase="start",
         kind="grad_allreduce",
@@ -129,18 +140,17 @@ def allreduce_grads_and_losses_across_replicas(
     allreduce_success = True
     try:
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
-            loss_reduced = aggregate_train_losses(losses_reduced)
+            loss_reduced = aggregate_train_losses(losses_reduced, num_rollouts)
         for model_chunk in model:
             # mimic: DistributedDataParallel.start_grad_sync
             for bucket_group in model_chunk.bucket_groups + model_chunk.expert_parallel_bucket_groups:
                 for bucket in bucket_group.buckets:
                     util.all_reduce(bucket.grad_data, pg, op=dist.ReduceOp.SUM)
     except Exception:
-        if not enable_experimental_ft_trainer():
-            raise
         allreduce_success = False
         log_structured(
             logger.error,
+            tag="ft",
             op="cross_cell",
             phase="fail",
             kind="grad_allreduce",
@@ -156,6 +166,7 @@ def allreduce_grads_and_losses_across_replicas(
         allreduce_success = False
         log_structured(
             logger.error,
+            tag="ft",
             op="cross_cell",
             phase="async_error",
             kind="grad_allreduce",
@@ -169,6 +180,7 @@ def allreduce_grads_and_losses_across_replicas(
     consensus = collective_bool_and(value=allreduce_success, group=get_gloo_group())
     log_structured(
         logger.info,
+        tag="ft",
         op="cross_cell",
         phase="end",
         kind="grad_allreduce",
